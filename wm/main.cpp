@@ -115,14 +115,14 @@ int main(void)
 	    if (it == windows.end())
 		cerr<<"unknow drawable "<<de->drawable<<endl;
 	    else {
-		/*
+		//*
 		XCopyArea(display, it->second.pixmap, compw, DefaultGC(display, 0), 
 			  de->area.x, de->area.y, 
 			  de->area.width, de->area.height, 
 			  it->second.x + de->area.x + it->second.board, 
 			  it->second.y + de->area.y + it->second.board);
 		//*/
-		//*
+		/*
 		XCopyArea(display, it->second.pixmap, compw, DefaultGC(display, 0), 
 			  0, 0, it->second.width, it->second.height, 
 			  it->second.x, it->second.y);
