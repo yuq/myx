@@ -65,12 +65,29 @@ int main(void)
 	       rrr->modes[i].id, rrr->modes[i].name, rrr->modes[i].width, rrr->modes[i].height);
     }
 
+    XRRSelectInput(display, rootw, RRScreenChangeNotifyMask|RRCrtcChangeNotifyMask|RROutputChangeNotifyMask|RROutputPropertyNotifyMask);
+
     XEvent event;
     while (1) {
 	XNextEvent(display, &event);
-	switch (event.type) {
-	case MapNotify:
-	    break;
+	if (event.type == rrevent + RRScreenChangeNotify) {
+	    XRRScreenChangeNotifyEvent *sce = (XRRScreenChangeNotifyEvent *)&event;
+	    printf("ScreenChange w=%d h=%d mw=%d mh=%d\n", 
+		   sce->width, sce->height, sce->mwidth, sce->mheight);
+	}
+	else if (event.type == rrevent + RRNotify + RRNotify_CrtcChange) {
+	    XRROutputChangeNotifyEvent *oce = (XRROutputChangeNotifyEvent *)&event;
+	    printf("OutputChange p=%d c=%d m=%d\n",
+		   oce->output, oce->crtc, oce->mode);
+	}
+	else if (event.type == rrevent + RRNotify + RRNotify_OutputChange) {
+	    XRRCrtcChangeNotifyEvent *cce = (XRRCrtcChangeNotifyEvent *)&event;
+	    printf("CrtcChange c=%d m=%d x=%d y=%d w=%d h=%d\n", 
+		   cce->crtc, cce->mode, cce->x, cce->y, cce->width, cce->height);
+	}
+	else if (event.type == rrevent + RRNotify + RRNotify_OutputProperty) {
+	    XRROutputPropertyNotifyEvent *ope = (XRROutputPropertyNotifyEvent *)&event;
+	    printf("OutputProperty p=%d\n", ope->output);
 	}
     }
 
