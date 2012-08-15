@@ -3,7 +3,7 @@
 TARGET := wm
 SRC := main.c
 OBJ := $(SRC:.c=.o)
-LIBS := X11 Xrender Xcomposite Xdamage Xfixes
+LIBS := X11 Xrender Xcomposite Xdamage Xfixes GL GLU
 LIBS := $(addprefix -l,$(LIBS))
 
 all: $(TARGET).out
