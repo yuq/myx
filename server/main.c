@@ -136,6 +136,34 @@ int main()
 	   gem_info.vram_size,
 	   gem_info.vram_visible);
 
+    // find a CRTC and connector to display
+    drmModeConnectorPtr connector = NULL;
+    for (i = 0; i < dmrp->count_connectors; i++)
+	if (dmnp[i]->connection == DRM_MODE_CONNECTED && dmnp[i]->count_modes > 0) {
+	    connector = dmnp[i];
+	    break;
+	}
+    assert(connector != NULL);
+
+    drmModeEncoderPtr encoder;
+    assert((encoder = drmModeGetEncoder (fd, connector->encoder_id)) != NULL);
+
+    drmModeCrtcPtr crtc;
+    assert((crtc = drmModeGetCrtc (fd, encoder->crtc_id)) != NULL);
+
+    drmModeModeInfoPtr mode = &crtc->mode;
+    printf("Dislay CRTC mode: %s vd=%d hd=%d\n", mode->name, mode->vdisplay, mode->hdisplay);
+
+    drmModeFBPtr fb;
+    assert((fb = drmModeGetFB(fd, crtc->buffer_id)) != NULL);
+    printf("Display CRTC FB: id=%d width=%d height=%d pitch=%d bpp=%d depth=%d\n",
+	   fb->fb_id,
+	   fb->width,
+	   fb->height,
+	   fb->pitch,
+	   fb->bpp,
+	   fb->depth);
+    
     struct radeon_bo_manager *bufmgr;
     assert((bufmgr = radeon_bo_manager_gem_ctor(fd)) != NULL);
     struct radeon_bo *bo;
@@ -147,26 +175,9 @@ int main()
     int fb_id;
     assert(drmModeAddFB(fd, 1280, 1024, 24, 32, 5120, bo->handle, &fb_id) == 0);
 
-    int output = 17;
-    drmModeModeInfo mode;
-    mode.clock = 108000;
-    mode.hdisplay = 1280;
-    mode.hsync_start = 1328;
-    mode.hsync_end = 1440;
-    mode.htotal = 1688;
-    mode.hskew = 0;
-    mode.vdisplay = 1024;
-    mode.vsync_start = 1025;
-    mode.vsync_end = 1028;
-    mode.vtotal = 1066;
-    mode.vscan = 0;
-    mode.vrefresh = 0;
-    mode.flags = 5;
-    mode.type = 0;
-    mode.name[0] = '\0';
-    assert(drmModeSetCrtc(fd, 10, fb_id, 0, 0, &output, 1, &mode) == 0);
-
-    sleep(15);
+    assert(drmModeSetCrtc(fd, crtc->crtc_id, fb_id, 0, 0, &connector->connector_id, 1, &crtc->mode) == 0);
+    sleep(10);
+    assert(drmModeSetCrtc(fd, crtc->crtc_id, crtc->buffer_id, crtc->x, crtc->y, &connector->connector_id, 1, &crtc->mode) == 0);
     
     drmClose(fd);
     return 0;
