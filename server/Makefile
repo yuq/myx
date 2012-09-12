@@ -2,4 +2,4 @@
 
 
 all:
-	gcc -g main.c -ldrm -ldrm_radeon -I/usr/include/drm -I/usr/include/libdrm
+	gcc -g main.c `pkg-config --cflags --libs libdrm cairo libdrm_radeon`
