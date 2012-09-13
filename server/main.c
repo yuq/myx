@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <math.h>
 
+#include <unistd.h>
+#include <signal.h>
+#include <pthread.h>
+
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <radeon_drm.h>
@@ -12,21 +16,40 @@
 
 #include <cairo.h>
 
-int main()
-{
-    int err;
+struct drm {
+	int fd;
+	drmModeResPtr res;
+	drmModeCrtcPtr *crtcs;
+	drmModeConnectorPtr *connectors;
+	drmModeEncoderPtr *encoders;
+	drmModeCrtcPtr curr_crtc;
+	drmModeConnectorPtr curr_connector;
+	drmModeEncoderPtr curr_encoder;
+} drm = {0};
 
-    printf("DRM AVA: %d\n", drmAvailable());
+#define FB_NUM 2
+#define FRAME_RATE 20
+
+struct fb_fifo {
+	int fb_ids[FB_NUM];
+	int fb_val[FB_NUM];
+	int rp;
+	int wp;
+	pthread_mutex_t wmutex;
+	pthread_mutex_t rmutex;
+	pthread_cond_t wcond;
+	pthread_cond_t rcond;
+} fb_fifo = {0};
+
+void drm_init(void)
+{
+    assert(drmAvailable());
+
     int fd;
+	assert((fd = drmOpen("radeon", NULL)) >= 0);
+
     drmVersionPtr verp;
-    if ((fd = drmOpen("radeon", NULL)) < 0) {
-		fprintf(stderr, "drmOpen error %d\n", fd);
-		return -1;
-    }
-    if ((verp = drmGetVersion(fd)) == NULL) {
-		fprintf(stderr, "drmGetVersion error\n");
-		return -1;
-    }
+    assert((verp = drmGetVersion(fd)) != NULL);
     printf("DRM VER: major %d  minor %d  patch %d  name %s  date %s  desc %s\n", 
 		   verp->version_major, 
 		   verp->version_minor, 
@@ -35,28 +58,20 @@ int main()
 		   verp->date, 
 		   verp->desc);
     drmFreeVersion(verp);
-    if ((verp = drmGetLibVersion(fd)) == NULL) {
-		fprintf(stderr, "drmGetLibVersion error\n");
-		return -1;
-    }
+
+    assert((verp = drmGetLibVersion(fd)) != NULL);
     printf("DRM LIB VER: major %d  minor %d  patch %d\n", 
 		   verp->version_major, 
 		   verp->version_minor, 
 		   verp->version_patchlevel);
     drmFreeVersion(verp);
 
-    char *busid = drmGetBusid(fd);
-    if (busid == NULL) {
-		fprintf(stderr, "drmGetBusid error\n");
-		return -1;
-    }
+    char *busid;
+	assert((busid = drmGetBusid(fd)) != NULL);
     printf("DRM BUSID: %s\n", busid);
 
-    drmModeResPtr dmrp = drmModeGetResources(fd);
-    if (dmrp == NULL) {
-		fprintf(stderr, "drmModeGetResources error\n");
-		return -1;
-    }
+    drmModeResPtr dmrp;
+	assert((dmrp = drmModeGetResources(fd)) != NULL);
     printf("DRM MODE RES: nfb=%d ncrtc=%d nconn=%d nenc=%d minw=%d maxw=%d minh=%d maxh=%d\n", 
 		   dmrp->count_fbs,
 		   dmrp->count_crtcs,
@@ -131,10 +146,7 @@ int main()
     }
 
     struct drm_radeon_gem_info gem_info;
-    if ((err = drmCommandWriteRead(fd, DRM_RADEON_GEM_INFO, &gem_info, sizeof(gem_info))) < 0) {
-		fprintf(stderr, "drmCommandWriteRead DRM_RADEON_GEM_INFO error %d\n", err);
-		return -1;
-    }
+    assert(drmCommandWriteRead(fd, DRM_RADEON_GEM_INFO, &gem_info, sizeof(gem_info)) == 0);
     printf("DRM GEM INFO: gart_size=%llx vram_size=%llx vram_visible=%llx\n", 
 		   gem_info.gart_size, 
 		   gem_info.vram_size,
@@ -167,17 +179,38 @@ int main()
 		   fb->pitch,
 		   fb->bpp,
 		   fb->depth);
-    
-    struct radeon_bo_manager *bufmgr;
-    assert((bufmgr = radeon_bo_manager_gem_ctor(fd)) != NULL);
+
+	drm.fd = fd;
+	drm.res = dmrp;
+	drm.crtcs = dmcp;
+	drm.connectors = dmnp;
+	drm.encoders = dmep;
+	drm.curr_crtc = crtc;
+	drm.curr_connector = connector;
+	drm.curr_encoder = encoder;
+}
+
+cairo_t *create_framebuffer(void)
+{
+	static int i = 0;
+	assert(i < FB_NUM);
+
+	struct radeon_bo_manager *bufmgr;
+    assert((bufmgr = radeon_bo_manager_gem_ctor(drm.fd)) != NULL);
+
     struct radeon_bo *bo;
 	int width = 1280, height = 1024, depth = 24, bpp = 32;
 	int pitch = width * (bpp / 8);
 	int screen_size = pitch * height;
     assert((bo = radeon_bo_open(bufmgr, 0, screen_size, 0x200, RADEON_GEM_DOMAIN_VRAM, 0)) != NULL);
+
     assert(radeon_bo_map(bo, 1) == 0);
     printf("map bo %x\n", (uint32_t)bo->ptr);
     memset(bo->ptr, 0, screen_size);
+
+	int fb_id;
+    assert(drmModeAddFB(drm.fd, width, height, depth, bpp, pitch, bo->handle, &fb_id) == 0);
+	fb_fifo.fb_ids[i++] = fb_id;
 
 	cairo_surface_t *surface;
 	surface = cairo_image_surface_create_for_data(bo->ptr,
@@ -185,44 +218,123 @@ int main()
 												  width,
 												  height,
 												  pitch);
+
 	cairo_t *cr;
 	cr = cairo_create(surface);
 
+	return cr;
+}
+
+void draw_frame(cairo_t *cr, double ma, double ha)
+{
 	cairo_set_source_rgb (cr, 1.0, 1.0, 1.0);
-	cairo_rectangle (cr, 0, 0, 500, 500);
+	cairo_rectangle (cr, 0, 0, 300, 300);
 	cairo_fill (cr);
 
-	double xc = 128.0;
-	double yc = 128.0;
-	double radius = 100.0;
-	double angle1 = 45.0  * (M_PI/180.0);  /* angles are specified */
-	double angle2 = 180.0 * (M_PI/180.0);  /* in radians           */
+	double xc = 150.0;
+	double yc = 150.0;
+	double dial_radius = 110.0;
+	double hour_radius = 80.0;
+	double minute_radius = 100.0;
 
+	// draw dial
 	cairo_set_source_rgb (cr, 0, 0, 0);
-	cairo_set_line_width (cr, 10.0);
-	cairo_arc (cr, xc, yc, radius, angle1, angle2);
+	cairo_set_line_width (cr, 8.0);
+	cairo_arc (cr, xc, yc, dial_radius, 0, 2 * M_PI);
 	cairo_stroke (cr);
 
-	/* draw helping lines */
+	// draw hour hand
 	cairo_set_source_rgba (cr, 1, 0.2, 0.2, 0.6);
 	cairo_set_line_width (cr, 6.0);
-
-	cairo_arc (cr, xc, yc, 10.0, 0, 2*M_PI);
-	cairo_fill (cr);
-
-	cairo_arc (cr, xc, yc, radius, angle1, angle1);
-	cairo_line_to (cr, xc, yc);
-	cairo_arc (cr, xc, yc, radius, angle2, angle2);
+	cairo_arc (cr, xc, yc, hour_radius, 0, ha);
 	cairo_line_to (cr, xc, yc);
 	cairo_stroke (cr);
 
-    int fb_id;
-    assert(drmModeAddFB(fd, width, height, depth, bpp, pitch, bo->handle, &fb_id) == 0);
+	// draw minute hand
+	cairo_set_source_rgba (cr, 1, 0.2, 0.6, 0.2);
+	cairo_set_line_width (cr, 4.0);
+	cairo_arc (cr, xc, yc, minute_radius, 0, ma);
+	cairo_line_to (cr, xc, yc);
+	cairo_stroke (cr);
+}
 
-    assert(drmModeSetCrtc(fd, crtc->crtc_id, fb_id, 0, 0, &connector->connector_id, 1, &crtc->mode) == 0);
-    sleep(10);
-    assert(drmModeSetCrtc(fd, crtc->crtc_id, crtc->buffer_id, crtc->x, crtc->y, &connector->connector_id, 1, &crtc->mode) == 0);
+static void user_abort(int dummy)
+{
+	assert(drmModeSetCrtc(drm.fd, drm.curr_crtc->crtc_id, drm.curr_crtc->buffer_id, 
+						  drm.curr_crtc->x, drm.curr_crtc->y, &drm.curr_connector->connector_id, 
+						  1, &drm.curr_crtc->mode) == 0);
     
-    drmClose(fd);
+    drmClose(drm.fd);
+    exit(0);
+}
+
+static void *frame_update(void *arg)
+{
+	while (1) {
+		assert(pthread_mutex_lock(&fb_fifo.rmutex) == 0);
+		while (fb_fifo.fb_val[fb_fifo.rp] != 1)
+			assert(pthread_cond_wait(&fb_fifo.rcond, &fb_fifo.rmutex) == 0);
+		assert(pthread_mutex_unlock(&fb_fifo.rmutex) == 0);
+
+		assert(drmModeSetCrtc(drm.fd, drm.curr_crtc->crtc_id, fb_fifo.fb_ids[fb_fifo.rp], 0, 0, 
+							  &drm.curr_connector->connector_id, 1, &drm.curr_crtc->mode) == 0);
+		usleep(1000 / FRAME_RATE * 1000);
+
+		assert(pthread_mutex_lock(&fb_fifo.wmutex) == 0);
+		fb_fifo.fb_val[fb_fifo.rp++] = 0;
+		assert(pthread_mutex_unlock(&fb_fifo.wmutex) == 0);
+		assert(pthread_cond_signal(&fb_fifo.wcond) == 0);
+
+		if (fb_fifo.rp >= FB_NUM)
+			fb_fifo.rp = 0;
+	}
+}
+
+int main()
+{
+    drm_init();
+
+	int i;
+	cairo_t *cr[FB_NUM];
+	for (i = 0; i < FB_NUM; i++)
+		cr[i] = create_framebuffer();
+
+	signal(SIGINT, user_abort);
+
+	pthread_attr_t attr;
+	pthread_t tid;
+	assert(pthread_mutex_init(&fb_fifo.wmutex, NULL) == 0);
+	assert(pthread_mutex_init(&fb_fifo.rmutex, NULL) == 0);
+	assert(pthread_cond_init(&fb_fifo.wcond, NULL) == 0);
+	assert(pthread_cond_init(&fb_fifo.rcond, NULL) == 0);
+	assert(pthread_attr_init(&attr) == 0);
+	assert(pthread_create(&tid, &attr, frame_update, NULL) == 0);
+
+	double ma = 0, ha = 0;
+	double periodic = 10;
+	while (1) {
+		assert(pthread_mutex_lock(&fb_fifo.wmutex) == 0);
+		while (fb_fifo.fb_val[fb_fifo.wp] != 0)
+			assert(pthread_cond_wait(&fb_fifo.wcond, &fb_fifo.wmutex) == 0);
+		assert(pthread_mutex_unlock(&fb_fifo.wmutex) == 0);
+
+		draw_frame(cr[fb_fifo.wp], ma, ha);
+
+		assert(pthread_mutex_lock(&fb_fifo.rmutex) == 0);
+		fb_fifo.fb_val[fb_fifo.wp++] = 1;
+		assert(pthread_mutex_unlock(&fb_fifo.rmutex) == 0);
+		assert(pthread_cond_signal(&fb_fifo.rcond) == 0);
+
+		if (fb_fifo.wp >= FB_NUM)
+			fb_fifo.wp = 0;
+		
+		ma += 2 * M_PI / (FRAME_RATE * periodic);
+		if (ma >= 2 * M_PI)
+			ma -= 2 * M_PI;
+		ha += 2 * M_PI / 12 / (FRAME_RATE * periodic);
+		if (ha >= 2 * M_PI)
+			ha -= 2 * M_PI;
+	}
+
     return 0;
 }
