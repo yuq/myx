@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <pthread.h>
+#include <time.h>
 
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -199,7 +200,8 @@ cairo_t *create_framebuffer(void)
     assert((bufmgr = radeon_bo_manager_gem_ctor(drm.fd)) != NULL);
 
     struct radeon_bo *bo;
-	int width = 1280, height = 1024, depth = 24, bpp = 32;
+	int width = drm.curr_crtc->mode.hdisplay, height = drm.curr_crtc->mode.vdisplay;
+	int depth = 24, bpp = 32;
 	int pitch = width * (bpp / 8);
 	int screen_size = pitch * height;
     assert((bo = radeon_bo_open(bufmgr, 0, screen_size, 0x200, RADEON_GEM_DOMAIN_VRAM, 0)) != NULL);
@@ -270,6 +272,13 @@ static void user_abort(int dummy)
 
 static void *frame_update(void *arg)
 {
+	struct timespec ts;
+	assert(clock_gettime (CLOCK_MONOTONIC, &ts) == 0);
+	uint64_t t = ts.tv_sec;
+	uint32_t delta = 1000000000 / FRAME_RATE;
+	t *= 1000000000;
+	t += ts.tv_nsec;
+
 	while (1) {
 		assert(pthread_mutex_lock(&fb_fifo.rmutex) == 0);
 		while (fb_fifo.fb_val[fb_fifo.rp] != 1)
@@ -281,7 +290,11 @@ static void *frame_update(void *arg)
 							  &drm.curr_connector->connector_id, 1, &drm.curr_crtc->mode) == 0);
 		*/
 		assert(drmModePageFlip(drm.fd, drm.curr_crtc->crtc_id, fb_fifo.fb_ids[fb_fifo.rp], 0, 0) == 0);
-		usleep(1000 / FRAME_RATE * 1000);
+
+		t += delta;
+		ts.tv_sec = t / 1000000000;
+		ts.tv_nsec = t % 1000000000;
+		assert(clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == 0);
 
 		assert(pthread_mutex_lock(&fb_fifo.wmutex) == 0);
 		fb_fifo.fb_val[fb_fifo.rp++] = 0;
