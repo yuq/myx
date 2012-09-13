@@ -276,8 +276,11 @@ static void *frame_update(void *arg)
 			assert(pthread_cond_wait(&fb_fifo.rcond, &fb_fifo.rmutex) == 0);
 		assert(pthread_mutex_unlock(&fb_fifo.rmutex) == 0);
 
+		/*
 		assert(drmModeSetCrtc(drm.fd, drm.curr_crtc->crtc_id, fb_fifo.fb_ids[fb_fifo.rp], 0, 0, 
 							  &drm.curr_connector->connector_id, 1, &drm.curr_crtc->mode) == 0);
+		*/
+		assert(drmModePageFlip(drm.fd, drm.curr_crtc->crtc_id, fb_fifo.fb_ids[fb_fifo.rp], 0, 0) == 0);
 		usleep(1000 / FRAME_RATE * 1000);
 
 		assert(pthread_mutex_lock(&fb_fifo.wmutex) == 0);
