@@ -272,6 +272,7 @@ static void user_abort(int dummy)
 
 static void *frame_update(void *arg)
 {
+	// wait for the first frame ready
 	assert(pthread_mutex_lock(&fb_fifo.rmutex) == 0);
 	while (fb_fifo.fb_val[fb_fifo.rp] != 1)
 		assert(pthread_cond_wait(&fb_fifo.rcond, &fb_fifo.rmutex) == 0);
@@ -291,15 +292,19 @@ static void *frame_update(void *arg)
 
 	int old_rp = -1;
 	while (1) {
+		// make display frame the start of a periodic
+		// the update will be more periodic aligned
 		/*
 		assert(drmModeSetCrtc(drm.fd, drm.curr_crtc->crtc_id, fb_fifo.fb_ids[fb_fifo.rp], 0, 0, 
 							  &drm.curr_connector->connector_id, 1, &drm.curr_crtc->mode) == 0);
 		//*/
+		// pend a page flip request, generate a page flip event when complete
 		assert(drmModePageFlip(drm.fd, drm.curr_crtc->crtc_id, fb_fifo.fb_ids[fb_fifo.rp], DRM_MODE_PAGE_FLIP_EVENT, 0) == 0);
 
 		// wait for page flip complete
 		assert(drmHandleEvent(drm.fd, &evctx) == 0);
 
+		// not until the page flip complete can we free the previous frame buffer
 		if (old_rp >= 0) {
 			assert(pthread_mutex_lock(&fb_fifo.wmutex) == 0);
 			fb_fifo.fb_val[old_rp] = 0;
@@ -311,11 +316,13 @@ static void *frame_update(void *arg)
 		if (fb_fifo.rp >= FB_NUM)
 			fb_fifo.rp = 0;
 
+		// wait for the next frame buffer paint ready
 		assert(pthread_mutex_lock(&fb_fifo.rmutex) == 0);
 		while (fb_fifo.fb_val[fb_fifo.rp] != 1)
 			assert(pthread_cond_wait(&fb_fifo.rcond, &fb_fifo.rmutex) == 0);
 		assert(pthread_mutex_unlock(&fb_fifo.rmutex) == 0);
 
+		// sleep until the next frame
 		t += delta;
 		ts.tv_sec = t / 1000000000;
 		ts.tv_nsec = t % 1000000000;
@@ -346,13 +353,16 @@ int main()
 	double ma = 0, ha = 0;
 	double periodic = 10;
 	while (1) {
+		// wait for the display thread free the frame buffer
 		assert(pthread_mutex_lock(&fb_fifo.wmutex) == 0);
 		while (fb_fifo.fb_val[fb_fifo.wp] != 0)
 			assert(pthread_cond_wait(&fb_fifo.wcond, &fb_fifo.wmutex) == 0);
 		assert(pthread_mutex_unlock(&fb_fifo.wmutex) == 0);
 
+		// draw the frame buffer
 		draw_frame(cr[fb_fifo.wp], ma, ha);
 
+		// mark frame buffer ready
 		assert(pthread_mutex_lock(&fb_fifo.rmutex) == 0);
 		fb_fifo.fb_val[fb_fifo.wp++] = 1;
 		assert(pthread_mutex_unlock(&fb_fifo.rmutex) == 0);
@@ -360,7 +370,8 @@ int main()
 
 		if (fb_fifo.wp >= FB_NUM)
 			fb_fifo.wp = 0;
-		
+
+		// update clock state
 		ma += 2 * M_PI / (FRAME_RATE * periodic);
 		if (ma >= 2 * M_PI)
 			ma -= 2 * M_PI;
