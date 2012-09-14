@@ -14,11 +14,14 @@
 #include <radeon_drm.h>
 #include <radeon_bo.h>
 #include <radeon_bo_gem.h>
+#include <radeon_cs.h>
+#include <radeon_cs_gem.h>
 
 #include <cairo.h>
 
 struct drm {
 	int fd;
+	// for display
 	drmModeResPtr res;
 	drmModeCrtcPtr *crtcs;
 	drmModeConnectorPtr *connectors;
@@ -26,6 +29,10 @@ struct drm {
 	drmModeCrtcPtr curr_crtc;
 	drmModeConnectorPtr curr_connector;
 	drmModeEncoderPtr curr_encoder;
+	// for GPU
+	struct radeon_bo_manager *bufmgr;
+	struct radeon_cs_manager *csm;
+	struct radeon_cs *cs;
 } drm = {0};
 
 #define FB_NUM 2
@@ -41,6 +48,15 @@ struct fb_fifo {
 	pthread_cond_t wcond;
 	pthread_cond_t rcond;
 } fb_fifo = {0};
+
+struct cursor {
+	int x;
+	int y;
+	int width;
+	int height;
+	cairo_t *cr;
+	struct radeon_bo *bo;
+} cursor = {0};
 
 void drm_init(void)
 {
@@ -181,6 +197,15 @@ void drm_init(void)
 		   fb->bpp,
 		   fb->depth);
 
+	struct radeon_bo_manager *bufmgr;
+    assert((bufmgr = radeon_bo_manager_gem_ctor(fd)) != NULL);
+
+	struct radeon_cs_manager *csm;
+	assert((csm = radeon_cs_manager_gem_ctor(fd)) != NULL);
+
+	struct radeon_cs *cs;
+	assert((cs = radeon_cs_create(csm, RADEON_BUFFER_SIZE/4)) != NULL);
+
 	drm.fd = fd;
 	drm.res = dmrp;
 	drm.crtcs = dmcp;
@@ -189,30 +214,24 @@ void drm_init(void)
 	drm.curr_crtc = crtc;
 	drm.curr_connector = connector;
 	drm.curr_encoder = encoder;
+
+	drm.bufmgr = bufmgr;
+	drm.csm = csm;
 }
 
-cairo_t *create_framebuffer(void)
+cairo_t *create_buffer(int width, int height, struct radeon_bo **rbo)
 {
-	static int i = 0;
-	assert(i < FB_NUM);
-
-	struct radeon_bo_manager *bufmgr;
-    assert((bufmgr = radeon_bo_manager_gem_ctor(drm.fd)) != NULL);
-
     struct radeon_bo *bo;
-	int width = drm.curr_crtc->mode.hdisplay, height = drm.curr_crtc->mode.vdisplay;
 	int depth = 24, bpp = 32;
 	int pitch = width * (bpp / 8);
-	int screen_size = pitch * height;
-    assert((bo = radeon_bo_open(bufmgr, 0, screen_size, 0x200, RADEON_GEM_DOMAIN_VRAM, 0)) != NULL);
+	int size = pitch * height;
+    assert((bo = radeon_bo_open(drm.bufmgr, 0, size, 0x200, RADEON_GEM_DOMAIN_VRAM, 0)) != NULL);
+	if (rbo)
+		*rbo = bo;
 
     assert(radeon_bo_map(bo, 1) == 0);
     printf("map bo %x\n", (uint32_t)bo->ptr);
-    memset(bo->ptr, 0, screen_size);
-
-	int fb_id;
-    assert(drmModeAddFB(drm.fd, width, height, depth, bpp, pitch, bo->handle, &fb_id) == 0);
-	fb_fifo.fb_ids[i++] = fb_id;
+    memset(bo->ptr, 0, size);
 
 	cairo_surface_t *surface;
 	surface = cairo_image_surface_create_for_data(bo->ptr,
@@ -225,6 +244,40 @@ cairo_t *create_framebuffer(void)
 	cr = cairo_create(surface);
 
 	return cr;
+}
+
+cairo_t *create_framebuffer(void)
+{
+	static int i = 0;
+	assert(i < FB_NUM);
+
+	struct radeon_bo *bo;
+	int width = drm.curr_crtc->mode.hdisplay;
+	int height = drm.curr_crtc->mode.vdisplay;
+	int depth = 24, bpp = 32;
+	int pitch = width * (bpp / 8);
+	int size = pitch * height;
+    cairo_t *cr = create_buffer(width, height, &bo);
+
+	int fb_id;
+    assert(drmModeAddFB(drm.fd, width, height, depth, bpp, pitch, bo->handle, &fb_id) == 0);
+	fb_fifo.fb_ids[i++] = fb_id;
+
+	return cr;
+}
+
+void create_cursor(void)
+{
+	cursor.width = 64;
+	cursor.height = 64;
+	cairo_t *cr = create_buffer(cursor.width, cursor.height, &cursor.bo);
+	cursor.cr = cr;
+
+	cairo_set_source_rgba (cr, 0.2, 0.2, 1, 0.5);
+	cairo_rectangle (cr, 0, 0, cursor.width, cursor.height);
+	cairo_fill (cr);
+
+	assert(drmModeSetCursor(drm.fd, drm.curr_crtc->crtc_id, cursor.bo->handle, cursor.width, cursor.height) == 0);
 }
 
 void draw_frame(cairo_t *cr, double ma, double ha)
@@ -253,7 +306,7 @@ void draw_frame(cairo_t *cr, double ma, double ha)
 	cairo_stroke (cr);
 
 	// draw minute hand
-	cairo_set_source_rgba (cr, 1, 0.2, 0.6, 0.2);
+	cairo_set_source_rgba (cr, 0.2, 1, 0.2, 0.6);
 	cairo_set_line_width (cr, 4.0);
 	cairo_arc (cr, xc, yc, minute_radius, 0, ma);
 	cairo_line_to (cr, xc, yc);
@@ -262,9 +315,13 @@ void draw_frame(cairo_t *cr, double ma, double ha)
 
 static void user_abort(int dummy)
 {
+	// restore previous framebuffer
 	assert(drmModeSetCrtc(drm.fd, drm.curr_crtc->crtc_id, drm.curr_crtc->buffer_id, 
 						  drm.curr_crtc->x, drm.curr_crtc->y, &drm.curr_connector->connector_id, 
 						  1, &drm.curr_crtc->mode) == 0);
+
+	// hide cursor
+	assert(drmModeSetCursor(drm.fd, drm.curr_crtc->crtc_id, 0, cursor.width, cursor.height) == 0);
     
     drmClose(drm.fd);
     exit(0);
@@ -290,6 +347,7 @@ static void *frame_update(void *arg)
 	t *= 1000000000;
 	t += ts.tv_nsec;
 
+	int cursor_delta = 1;
 	int old_rp = -1;
 	while (1) {
 		// make display frame the start of a periodic
@@ -300,6 +358,15 @@ static void *frame_update(void *arg)
 		//*/
 		// pend a page flip request, generate a page flip event when complete
 		assert(drmModePageFlip(drm.fd, drm.curr_crtc->crtc_id, fb_fifo.fb_ids[fb_fifo.rp], DRM_MODE_PAGE_FLIP_EVENT, 0) == 0);
+
+		// move cursor
+		assert(drmModeMoveCursor(drm.fd, drm.curr_crtc->crtc_id, cursor.x, cursor.y) == 0);
+		cursor.x += cursor_delta;
+		cursor.y += cursor_delta;
+		if (cursor.x >= drm.curr_crtc->mode.hdisplay || 
+			cursor.y >= drm.curr_crtc->mode.vdisplay ||
+			cursor.x <= 0 || cursor.y <= 0)
+			cursor_delta *= -1;
 
 		// wait for page flip complete
 		assert(drmHandleEvent(drm.fd, &evctx) == 0);
@@ -333,6 +400,7 @@ static void *frame_update(void *arg)
 int main()
 {
     drm_init();
+	create_cursor();
 
 	int i;
 	cairo_t *cr[FB_NUM];
