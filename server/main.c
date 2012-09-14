@@ -272,6 +272,16 @@ static void user_abort(int dummy)
 
 static void *frame_update(void *arg)
 {
+	assert(pthread_mutex_lock(&fb_fifo.rmutex) == 0);
+	while (fb_fifo.fb_val[fb_fifo.rp] != 1)
+		assert(pthread_cond_wait(&fb_fifo.rcond, &fb_fifo.rmutex) == 0);
+	assert(pthread_mutex_unlock(&fb_fifo.rmutex) == 0);
+
+	drmEventContext evctx;
+	evctx.version = DRM_EVENT_CONTEXT_VERSION;
+	evctx.vblank_handler = NULL;
+	evctx.page_flip_handler = NULL;
+
 	struct timespec ts;
 	assert(clock_gettime (CLOCK_MONOTONIC, &ts) == 0);
 	uint64_t t = ts.tv_sec;
@@ -279,30 +289,37 @@ static void *frame_update(void *arg)
 	t *= 1000000000;
 	t += ts.tv_nsec;
 
+	int old_rp = -1;
 	while (1) {
+		/*
+		assert(drmModeSetCrtc(drm.fd, drm.curr_crtc->crtc_id, fb_fifo.fb_ids[fb_fifo.rp], 0, 0, 
+							  &drm.curr_connector->connector_id, 1, &drm.curr_crtc->mode) == 0);
+		//*/
+		assert(drmModePageFlip(drm.fd, drm.curr_crtc->crtc_id, fb_fifo.fb_ids[fb_fifo.rp], DRM_MODE_PAGE_FLIP_EVENT, 0) == 0);
+
+		// wait for page flip complete
+		assert(drmHandleEvent(drm.fd, &evctx) == 0);
+
+		if (old_rp >= 0) {
+			assert(pthread_mutex_lock(&fb_fifo.wmutex) == 0);
+			fb_fifo.fb_val[old_rp] = 0;
+			assert(pthread_mutex_unlock(&fb_fifo.wmutex) == 0);
+			assert(pthread_cond_signal(&fb_fifo.wcond) == 0);
+		}
+
+		old_rp = fb_fifo.rp++;
+		if (fb_fifo.rp >= FB_NUM)
+			fb_fifo.rp = 0;
+
 		assert(pthread_mutex_lock(&fb_fifo.rmutex) == 0);
 		while (fb_fifo.fb_val[fb_fifo.rp] != 1)
 			assert(pthread_cond_wait(&fb_fifo.rcond, &fb_fifo.rmutex) == 0);
 		assert(pthread_mutex_unlock(&fb_fifo.rmutex) == 0);
 
-		/*
-		assert(drmModeSetCrtc(drm.fd, drm.curr_crtc->crtc_id, fb_fifo.fb_ids[fb_fifo.rp], 0, 0, 
-							  &drm.curr_connector->connector_id, 1, &drm.curr_crtc->mode) == 0);
-		*/
-		assert(drmModePageFlip(drm.fd, drm.curr_crtc->crtc_id, fb_fifo.fb_ids[fb_fifo.rp], 0, 0) == 0);
-
 		t += delta;
 		ts.tv_sec = t / 1000000000;
 		ts.tv_nsec = t % 1000000000;
 		assert(clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == 0);
-
-		assert(pthread_mutex_lock(&fb_fifo.wmutex) == 0);
-		fb_fifo.fb_val[fb_fifo.rp++] = 0;
-		assert(pthread_mutex_unlock(&fb_fifo.wmutex) == 0);
-		assert(pthread_cond_signal(&fb_fifo.wcond) == 0);
-
-		if (fb_fifo.rp >= FB_NUM)
-			fb_fifo.rp = 0;
 	}
 }
 
