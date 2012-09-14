@@ -366,7 +366,7 @@ static void *frame_update(void *arg)
 		if (cursor.x >= drm.curr_crtc->mode.hdisplay || 
 			cursor.y >= drm.curr_crtc->mode.vdisplay ||
 			cursor.x <= 0 || cursor.y <= 0)
-			cursor_delta *= -1;
+			cursor_delta = -cursor_delta;
 
 		// wait for page flip complete
 		assert(drmHandleEvent(drm.fd, &evctx) == 0);
