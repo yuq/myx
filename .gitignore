@@ -4,3 +4,7 @@
 *.out
 *.d
 out/
+GTAGS
+GPATH
+GRTAGS
+GSYMS
