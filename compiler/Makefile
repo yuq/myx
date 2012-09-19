@@ -1,6 +1,6 @@
 #!makefile
 
-CONTEXT := GLUT
+CONTEXT := GLX
 
 DEFS :=
 LIBS := -lGL
