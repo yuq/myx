@@ -3,6 +3,7 @@
 *.a
 *.out
 *.d
+*.bin
 out/
 GTAGS
 GPATH
