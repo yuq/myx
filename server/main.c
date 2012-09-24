@@ -256,7 +256,6 @@ cairo_t *create_framebuffer(void)
 	int height = drm.curr_crtc->mode.vdisplay;
 	int depth = 24, bpp = 32;
 	int pitch = width * (bpp / 8);
-	int size = pitch * height;
     cairo_t *cr = create_buffer(width, height, &bo);
 
 	int fb_id;
