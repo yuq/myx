@@ -169,6 +169,16 @@ void drm_init(void)
 		   gem_info.vram_size,
 		   gem_info.vram_visible);
 
+	/* invalid in KMS world
+	drm_radeon_getparam_t gp;
+	unsigned int gart_base;
+	memset(&gp, 0, sizeof(gp));
+	gp.param = RADEON_PARAM_GART_BASE;
+	gp.value = &gart_base;
+	assert(drmCommandWriteRead(fd, DRM_RADEON_GETPARAM, &gp, sizeof(gp)) == 0);
+	printf("DRM RADEON GART BASE: %x\n", gart_base);
+	//*/
+
     // find a CRTC and connector to display
     drmModeConnectorPtr connector = NULL;
     for (i = 0; i < dmrp->count_connectors; i++)

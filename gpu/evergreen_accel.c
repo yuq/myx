@@ -1,6 +1,62 @@
 #include <string.h>
+#include <assert.h>
 
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <radeon_drm.h>
+#include <radeon_bo.h>
+#include <radeon_bo_gem.h>
+#include <radeon_cs.h>
+#include <radeon_cs_gem.h>
+
+#include "radeon_reg.h"
+#include "evergreen_reg.h"
 #include "evergreen_state.h"
+
+struct drm {
+	int fd;
+	// for display
+	drmModeCrtcPtr curr_crtc;
+	drmModeConnectorPtr curr_connector;
+	drmModeEncoderPtr curr_encoder;
+	// for GPU
+	struct radeon_bo_manager *bufmgr;
+	struct radeon_cs_manager *csm;
+	struct radeon_cs *cs;
+};
+extern struct drm drm;
+
+// from radeon.h
+#define RADEON_ALIGN(x,bytes) (((x) + ((bytes) - 1)) & ~((bytes) - 1))
+
+#define CP_PACKET0(reg, n)						\
+	(RADEON_CP_PACKET0 | ((n) << 16) | ((reg) >> 2))
+#define CP_PACKET1(reg0, reg1)						\
+	(RADEON_CP_PACKET1 | (((reg1) >> 2) << 11) | ((reg0) >> 2))
+#define CP_PACKET2()							\
+	(RADEON_CP_PACKET2)
+#define CP_PACKET3(pkt, n)						\
+	(RADEON_CP_PACKET3 | (pkt) | ((n) << 16))
+
+
+static const uint32_t EVERGREEN_ROP[16] = {
+    RADEON_ROP3_ZERO, /* GXclear        */
+    RADEON_ROP3_DSa,  /* Gxand          */
+    RADEON_ROP3_SDna, /* GXandReverse   */
+    RADEON_ROP3_S,    /* GXcopy         */
+    RADEON_ROP3_DSna, /* GXandInverted  */
+    RADEON_ROP3_D,    /* GXnoop         */
+    RADEON_ROP3_DSx,  /* GXxor          */
+    RADEON_ROP3_DSo,  /* GXor           */
+    RADEON_ROP3_DSon, /* GXnor          */
+    RADEON_ROP3_DSxn, /* GXequiv        */
+    RADEON_ROP3_Dn,   /* GXinvert       */
+    RADEON_ROP3_SDno, /* GXorReverse    */
+    RADEON_ROP3_Sn,   /* GXcopyInverted */
+    RADEON_ROP3_DSno, /* GXorInverted   */
+    RADEON_ROP3_DSan, /* GXnand         */
+    RADEON_ROP3_ONE,  /* GXset          */
+};
 
 void
 evergreen_start_3d(void)
@@ -245,17 +301,17 @@ evergreen_set_default_state(struct radeon_bo *shader_bo)
     /* DB */
     BEGIN_BATCH(3 + 2);
     EREG(DB_Z_INFO,                           0);
-    RELOC_BATCH(shaders_bo, RADEON_GEM_DOMAIN_VRAM, 0);
+    RELOC_BATCH(shader_bo, RADEON_GEM_DOMAIN_VRAM, 0);
     END_BATCH();
 
     BEGIN_BATCH(3 + 2);
     EREG(DB_STENCIL_INFO,                     0);
-    RELOC_BATCH(shaders_bo, RADEON_GEM_DOMAIN_VRAM, 0);
+    RELOC_BATCH(shader_bo, RADEON_GEM_DOMAIN_VRAM, 0);
     END_BATCH();
 
     BEGIN_BATCH(3 + 2);
     EREG(DB_HTILE_DATA_BASE,                    0);
-    RELOC_BATCH(shaders_bo, RADEON_GEM_DOMAIN_VRAM, 0);
+    RELOC_BATCH(shader_bo, RADEON_GEM_DOMAIN_VRAM, 0);
     END_BATCH();
 
     BEGIN_BATCH(49);
@@ -307,10 +363,10 @@ evergreen_set_default_state(struct radeon_bo *shader_bo)
 
     /* clip boolean is set to always visible -> doesn't matter */
     for (i = 0; i < PA_SC_CLIPRECT_0_TL_num; i++)
-		evergreen_set_clip_rect (pScrn, i, 0, 0, 8192, 8192);
+		evergreen_set_clip_rect (i, 0, 0, 8192, 8192);
 
     for (i = 0; i < PA_SC_VPORT_SCISSOR_0_TL_num; i++)
-		evergreen_set_vport_scissor (pScrn, i, 0, 0, 8192, 8192);
+		evergreen_set_vport_scissor (i, 0, 0, 8192, 8192);
 
     BEGIN_BATCH(57);
     PACK0(PA_SC_MODE_CNTL_0, 2);
@@ -379,7 +435,7 @@ evergreen_set_default_state(struct radeon_bo *shader_bo)
     END_BATCH();
 
     // clear FS
-    fs_conf.bo = shaders_bo;
+    fs_conf.bo = shader_bo;
     evergreen_fs_setup(&fs_conf, RADEON_GEM_DOMAIN_VRAM);
 
     // VGT
@@ -491,3 +547,296 @@ evergreen_vs_setup(shader_config_t *vs_conf, uint32_t domain)
     E32(sq_pgm_resources_2);
     END_BATCH();
 }
+
+void
+evergreen_ps_setup(shader_config_t *ps_conf, uint32_t domain)
+{
+    uint32_t sq_pgm_resources, sq_pgm_resources_2;
+
+    sq_pgm_resources = ((ps_conf->num_gprs << NUM_GPRS_shift) |
+						(ps_conf->stack_size << STACK_SIZE_shift));
+
+    if (ps_conf->dx10_clamp)
+		sq_pgm_resources |= DX10_CLAMP_bit;
+    if (ps_conf->uncached_first_inst)
+		sq_pgm_resources |= UNCACHED_FIRST_INST_bit;
+    if (ps_conf->clamp_consts)
+		sq_pgm_resources |= CLAMP_CONSTS_bit;
+
+    sq_pgm_resources_2 = ((ps_conf->single_round << SINGLE_ROUND_shift) |
+						  (ps_conf->double_round << DOUBLE_ROUND_shift));
+
+    if (ps_conf->allow_sdi)
+		sq_pgm_resources_2 |= ALLOW_SINGLE_DENORM_IN_bit;
+    if (ps_conf->allow_sd0)
+		sq_pgm_resources_2 |= ALLOW_SINGLE_DENORM_OUT_bit;
+    if (ps_conf->allow_ddi)
+		sq_pgm_resources_2 |= ALLOW_DOUBLE_DENORM_IN_bit;
+    if (ps_conf->allow_ddo)
+		sq_pgm_resources_2 |= ALLOW_DOUBLE_DENORM_OUT_bit;
+
+    /* flush SQ cache */
+    evergreen_cp_set_surface_sync(SH_ACTION_ENA_bit,
+								  ps_conf->shader_size, ps_conf->shader_addr,
+								  ps_conf->bo, domain, 0);
+
+    BEGIN_BATCH(3 + 2);
+    EREG(SQ_PGM_START_PS, ps_conf->shader_addr >> 8);
+    RELOC_BATCH(ps_conf->bo, domain, 0);
+    END_BATCH();
+
+    BEGIN_BATCH(5);
+    PACK0(SQ_PGM_RESOURCES_PS, 3);
+    E32(sq_pgm_resources);
+    E32(sq_pgm_resources_2);
+    E32(ps_conf->export_mode);
+    END_BATCH();
+}
+
+void
+evergreen_set_render_target(cb_config_t *cb_conf, uint32_t domain)
+{
+    uint32_t cb_color_info, cb_color_attrib = 0, cb_color_dim;
+    int pitch, slice, h;
+
+    cb_color_info = ((cb_conf->endian      << ENDIAN_shift)				|
+					 (cb_conf->format      << CB_COLOR0_INFO__FORMAT_shift)		|
+					 (cb_conf->array_mode  << CB_COLOR0_INFO__ARRAY_MODE_shift)		|
+					 (cb_conf->number_type << NUMBER_TYPE_shift)			|
+					 (cb_conf->comp_swap   << COMP_SWAP_shift)				|
+					 (cb_conf->source_format << SOURCE_FORMAT_shift)                    |
+					 (cb_conf->resource_type << RESOURCE_TYPE_shift));
+    if (cb_conf->blend_clamp)
+		cb_color_info |= BLEND_CLAMP_bit;
+    if (cb_conf->fast_clear)
+		cb_color_info |= FAST_CLEAR_bit;
+    if (cb_conf->compression)
+		cb_color_info |= COMPRESSION_bit;
+    if (cb_conf->blend_bypass)
+		cb_color_info |= BLEND_BYPASS_bit;
+    if (cb_conf->simple_float)
+		cb_color_info |= SIMPLE_FLOAT_bit;
+    if (cb_conf->round_mode)
+		cb_color_info |= CB_COLOR0_INFO__ROUND_MODE_bit;
+    if (cb_conf->tile_compact)
+		cb_color_info |= CB_COLOR0_INFO__TILE_COMPACT_bit;
+    if (cb_conf->rat)
+		cb_color_info |= RAT_bit;
+
+    /* bit 4 needs to be set for linear and depth/stencil surfaces */
+    if (cb_conf->non_disp_tiling)
+		cb_color_attrib |= CB_COLOR0_ATTRIB__NON_DISP_TILING_ORDER_bit;
+
+    pitch = (cb_conf->w / 8) - 1;
+    h = RADEON_ALIGN(cb_conf->h, 8);
+    slice = ((cb_conf->w * h) / 64) - 1;
+
+    switch (cb_conf->resource_type) {
+    case BUFFER:
+		/* number of elements in the surface */
+		cb_color_dim = pitch * slice;
+		break;
+    default:
+		/* w/h of the surface */
+		cb_color_dim = (((cb_conf->w - 1) << WIDTH_MAX_shift) |
+						((cb_conf->h - 1) << HEIGHT_MAX_shift));
+		break;
+    }
+
+    BEGIN_BATCH(3 + 2);
+    EREG(CB_COLOR0_BASE + (0x3c * cb_conf->id), (cb_conf->base >> 8));
+    RELOC_BATCH(cb_conf->bo, 0, domain);
+    END_BATCH();
+
+    /* Set CMASK & FMASK buffer to the offset of color buffer as
+     * we don't use those this shouldn't cause any issue and we
+     * then have a valid cmd stream
+     */
+    BEGIN_BATCH(3 + 2);
+    EREG(CB_COLOR0_CMASK + (0x3c * cb_conf->id), (0     >> 8));
+    RELOC_BATCH(cb_conf->bo, 0, domain);
+    END_BATCH();
+    BEGIN_BATCH(3 + 2);
+    EREG(CB_COLOR0_FMASK + (0x3c * cb_conf->id), (0     >> 8));
+    RELOC_BATCH(cb_conf->bo, 0, domain);
+    END_BATCH();
+
+    /* tiling config */
+    BEGIN_BATCH(3 + 2);
+    EREG(CB_COLOR0_ATTRIB + (0x3c * cb_conf->id), cb_color_attrib);
+    RELOC_BATCH(cb_conf->bo, 0, domain);
+    END_BATCH();
+    BEGIN_BATCH(3 + 2);
+    EREG(CB_COLOR0_INFO + (0x3c * cb_conf->id), cb_color_info);
+    RELOC_BATCH(cb_conf->bo, 0, domain);
+    END_BATCH();
+
+    BEGIN_BATCH(33);
+    EREG(CB_COLOR0_PITCH + (0x3c * cb_conf->id), pitch);
+    EREG(CB_COLOR0_SLICE + (0x3c * cb_conf->id), slice);
+    EREG(CB_COLOR0_VIEW + (0x3c * cb_conf->id), 0);
+    EREG(CB_COLOR0_DIM + (0x3c * cb_conf->id), cb_color_dim);
+    EREG(CB_COLOR0_CMASK_SLICE + (0x3c * cb_conf->id), 0);
+    EREG(CB_COLOR0_FMASK_SLICE + (0x3c * cb_conf->id), 0);
+    PACK0(CB_COLOR0_CLEAR_WORD0 + (0x3c * cb_conf->id), 4);
+    E32(0);
+    E32(0);
+    E32(0);
+    E32(0);
+    EREG(CB_TARGET_MASK, (cb_conf->pmask << TARGET0_ENABLE_shift));
+    EREG(CB_COLOR_CONTROL, (EVERGREEN_ROP[cb_conf->rop] |
+							(CB_NORMAL << CB_COLOR_CONTROL__MODE_shift)));
+    EREG(CB_BLEND0_CONTROL, cb_conf->blendcntl);
+    END_BATCH();
+}
+
+void
+evergreen_set_spi(int vs_export_count, int num_interp)
+{
+    BEGIN_BATCH(8);
+    /* Interpolator setup */
+    EREG(SPI_VS_OUT_CONFIG, (vs_export_count << VS_EXPORT_COUNT_shift));
+    PACK0(SPI_PS_IN_CONTROL_0, 3);
+    E32(((num_interp << NUM_INTERP_shift) |
+		 LINEAR_GRADIENT_ENA_bit)); // SPI_PS_IN_CONTROL_0
+    E32(0); // SPI_PS_IN_CONTROL_1
+    E32(0); // SPI_INTERP_CONTROL_0
+    END_BATCH();
+}
+
+void
+evergreen_set_alu_consts(const_config_t *const_conf, uint32_t domain)
+{
+    /* size reg is units of 16 consts (4 dwords each) */
+    uint32_t size = const_conf->size_bytes >> 8;
+
+    if (size == 0)
+		size = 1;
+
+    /* flush SQ cache */
+    evergreen_cp_set_surface_sync(SH_ACTION_ENA_bit,
+								  const_conf->size_bytes, const_conf->const_addr,
+								  const_conf->bo, domain, 0);
+
+    switch (const_conf->type) {
+    case SHADER_TYPE_VS:
+		BEGIN_BATCH(3);
+		EREG(SQ_ALU_CONST_BUFFER_SIZE_VS_0, size);
+		END_BATCH();
+		BEGIN_BATCH(3 + 2);
+		EREG(SQ_ALU_CONST_CACHE_VS_0, const_conf->const_addr >> 8);
+		RELOC_BATCH(const_conf->bo, domain, 0);
+		END_BATCH();
+		break;
+    case SHADER_TYPE_PS:
+		BEGIN_BATCH(3);
+		EREG(SQ_ALU_CONST_BUFFER_SIZE_PS_0, size);
+		END_BATCH();
+		BEGIN_BATCH(3 + 2);
+		EREG(SQ_ALU_CONST_CACHE_PS_0, const_conf->const_addr >> 8);
+		RELOC_BATCH(const_conf->bo, domain, 0);
+		END_BATCH();
+		break;
+    default:
+		/* error */
+		break;
+    }
+
+}
+
+static void
+evergreen_set_vtx_resource(vtx_resource_t *res, uint32_t domain, int offset)
+{
+    uint32_t sq_vtx_constant_word2, sq_vtx_constant_word3, sq_vtx_constant_word4;
+
+    sq_vtx_constant_word2 = ((((res->vb_addr) >> 32) & BASE_ADDRESS_HI_mask) |
+							 ((res->vtx_size_dw << 2) << SQ_VTX_CONSTANT_WORD2_0__STRIDE_shift) |
+							 (res->format << SQ_VTX_CONSTANT_WORD2_0__DATA_FORMAT_shift) |
+							 (res->num_format_all << SQ_VTX_CONSTANT_WORD2_0__NUM_FORMAT_ALL_shift) |
+							 (res->endian << SQ_VTX_CONSTANT_WORD2_0__ENDIAN_SWAP_shift));
+    if (res->clamp_x)
+	    sq_vtx_constant_word2 |= SQ_VTX_CONSTANT_WORD2_0__CLAMP_X_bit;
+
+    if (res->format_comp_all)
+	    sq_vtx_constant_word2 |= SQ_VTX_CONSTANT_WORD2_0__FORMAT_COMP_ALL_bit;
+
+    if (res->srf_mode_all)
+	    sq_vtx_constant_word2 |= SQ_VTX_CONSTANT_WORD2_0__SRF_MODE_ALL_bit;
+
+    sq_vtx_constant_word3 = ((res->dst_sel_x << SQ_VTX_CONSTANT_WORD3_0__DST_SEL_X_shift) |
+							 (res->dst_sel_y << SQ_VTX_CONSTANT_WORD3_0__DST_SEL_Y_shift) |
+							 (res->dst_sel_z << SQ_VTX_CONSTANT_WORD3_0__DST_SEL_Z_shift) |
+							 (res->dst_sel_w << SQ_VTX_CONSTANT_WORD3_0__DST_SEL_W_shift));
+
+    if (res->uncached)
+		sq_vtx_constant_word3 |= SQ_VTX_CONSTANT_WORD3_0__UNCACHED_bit;
+
+    /* XXX ??? */
+    sq_vtx_constant_word4 = 0;
+
+	evergreen_cp_set_surface_sync(VC_ACTION_ENA_bit, offset, 0, res->bo, domain, 0);
+
+    BEGIN_BATCH(10 + 2);
+    PACK0(SQ_FETCH_RESOURCE + res->id * SQ_FETCH_RESOURCE_offset, 8);
+    E32(res->vb_addr & 0xffffffff);				// 0: BASE_ADDRESS
+    E32((res->vtx_num_entries << 2) - 1);			// 1: SIZE
+    E32(sq_vtx_constant_word2);	// 2: BASE_HI, STRIDE, CLAMP, FORMAT, ENDIAN
+    E32(sq_vtx_constant_word3);		// 3: swizzles
+    E32(sq_vtx_constant_word4);		// 4: num elements
+    E32(0);							// 5: n/a
+    E32(0);							// 6: n/a
+    E32(SQ_TEX_VTX_VALID_BUFFER << SQ_VTX_CONSTANT_WORD7_0__TYPE_shift);	// 7: TYPE
+    RELOC_BATCH(res->bo, domain, 0);
+    END_BATCH();
+}
+
+void
+evergreen_draw_auto(draw_config_t *draw_conf)
+{
+    BEGIN_BATCH(10);
+    EREG(VGT_PRIMITIVE_TYPE, draw_conf->prim_type);
+    PACK3(IT_INDEX_TYPE, 1);
+    E32(draw_conf->index_type);
+    PACK3(IT_NUM_INSTANCES, 1);
+    E32(draw_conf->num_instances);
+    PACK3(IT_DRAW_INDEX_AUTO, 2);
+    E32(draw_conf->num_indices);
+    E32(draw_conf->vgt_draw_initiator);
+    END_BATCH();
+}
+
+void
+evergreen_finish_op(struct radeon_bo *dst, int size, struct radeon_bo *vbo, int offset, int vtx_size)
+{
+    draw_config_t   draw_conf;
+    vtx_resource_t  vtx_res;
+
+    CLEAR (draw_conf);
+    CLEAR (vtx_res);
+
+    /* Vertex buffer setup */
+    vtx_res.id              = SQ_FETCH_RESOURCE_vs;
+    vtx_res.vtx_size_dw     = vtx_size / 4;
+    vtx_res.vtx_num_entries = offset / 4;
+    vtx_res.vb_addr         = 0;
+    vtx_res.bo              = vbo;
+    vtx_res.dst_sel_x       = SQ_SEL_X;
+    vtx_res.dst_sel_y       = SQ_SEL_Y;
+    vtx_res.dst_sel_z       = SQ_SEL_Z;
+    vtx_res.dst_sel_w       = SQ_SEL_W;
+    evergreen_set_vtx_resource(&vtx_res, RADEON_GEM_DOMAIN_GTT, offset);
+
+    /* Draw */
+    draw_conf.prim_type          = DI_PT_RECTLIST;
+    draw_conf.vgt_draw_initiator = DI_SRC_SEL_AUTO_INDEX;
+    draw_conf.num_instances      = 1;
+    draw_conf.num_indices        = vtx_res.vtx_num_entries / vtx_res.vtx_size_dw;
+    draw_conf.index_type         = DI_INDEX_SIZE_16_BIT;
+
+    evergreen_draw_auto(&draw_conf);
+
+    /* sync dst surface */
+    evergreen_cp_set_surface_sync((CB_ACTION_ENA_bit | CB0_DEST_BASE_ENA_bit),
+								  size, 0, dst, 0, RADEON_GEM_DOMAIN_VRAM);
+}
+

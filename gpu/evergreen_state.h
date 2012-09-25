@@ -27,6 +27,8 @@
 #ifndef __EVERGREEN_STATE_H__
 #define __EVERGREEN_STATE_H__
 
+#include <stdint.h>
+
 typedef int bool_t;
 
 #define CLEAR(x) memset (&x, 0, sizeof(x))
@@ -222,73 +224,101 @@ typedef struct {
     uint32_t num_indices;
 } draw_config_t;
 
-#define BEGIN_BATCH(n)			\
-do {								\
-    radeon_ddx_cs_start(pScrn, (n), __FILE__, __func__, __LINE__);	\
-} while(0)
-#define END_BATCH()			\
-do {					\
-    radeon_cs_end(info->cs, __FILE__, __func__, __LINE__);	\
-} while(0)
-#define RELOC_BATCH(bo, rd, wd)				\
-do {							\
-    int _ret;								\
-    _ret = radeon_cs_write_reloc(info->cs, (bo), (rd), (wd), 0);	\
-    if (_ret) ErrorF("reloc emit failure %d (%s %d)\n", _ret, __func__, __LINE__); \
-} while(0)
-#define E32(dword)                                                  \
-do {                                                                    \
-    radeon_cs_write_dword(info->cs, (dword));				\
-} while (0)
+#define BEGIN_BATCH(n)												\
+	do {															\
+		radeon_cs_begin(drm.cs, (n), __FILE__, __func__, __LINE__);	\
+	} while(0)
+#define END_BATCH()												\
+	do {														\
+		radeon_cs_end(drm.cs, __FILE__, __func__, __LINE__);	\
+	} while(0)
+#define RELOC_BATCH(bo, rd, wd)											\
+	do {																\
+		assert(radeon_cs_write_reloc(drm.cs, (bo), (rd), (wd), 0) == 0); \
+	} while(0)
+#define E32(dword)								\
+	do {										\
+		radeon_cs_write_dword(drm.cs, (dword));	\
+	} while (0)
 
-#define EFLOAT(val)							\
-do {								\
-    union { float f; uint32_t d; } a;                                   \
-    a.f = (val);							\
-    E32(a.d);							\
-} while (0)
+#define EFLOAT(val)								\
+	do {										\
+		union { float f; uint32_t d; } a;		\
+		a.f = (val);							\
+		E32(a.d);								\
+	} while (0)
 
-#define PACK3(cmd, num)	       					\
-do {                                                                    \
-    E32(RADEON_CP_PACKET3 | ((cmd) << 8) | ((((num) - 1) & 0x3fff) << 16)); \
-} while (0)
+#define PACK3(cmd, num)													\
+	do {																\
+		E32(RADEON_CP_PACKET3 | ((cmd) << 8) | ((((num) - 1) & 0x3fff) << 16)); \
+	} while (0)
 
 /* write num registers, start at reg */
 /* If register falls in a special area, special commands are issued */
-#define PACK0(reg, num)                                             \
-do {                                                                    \
-    if ((reg) >= SET_CONFIG_REG_offset && (reg) < SET_CONFIG_REG_end) {	\
-	PACK3(IT_SET_CONFIG_REG, (num) + 1);			\
-	E32(((reg) - SET_CONFIG_REG_offset) >> 2);                  \
-    } else if ((reg) >= SET_CONTEXT_REG_offset && (reg) < SET_CONTEXT_REG_end) { \
-	PACK3(IT_SET_CONTEXT_REG, (num) + 1);			\
-	E32(((reg) - SET_CONTEXT_REG_offset) >> 2);			\
-    } else if ((reg) >= SET_RESOURCE_offset && (reg) < SET_RESOURCE_end) { \
-	PACK3(IT_SET_RESOURCE, num + 1);				\
-	E32(((reg) - SET_RESOURCE_offset) >> 2);			\
-    } else if ((reg) >= SET_SAMPLER_offset && (reg) < SET_SAMPLER_end) { \
-	PACK3(IT_SET_SAMPLER, (num) + 1);				\
-	E32((reg - SET_SAMPLER_offset) >> 2);			\
-    } else if ((reg) >= SET_CTL_CONST_offset && (reg) < SET_CTL_CONST_end) { \
-	PACK3(IT_SET_CTL_CONST, (num) + 1);			\
-	E32(((reg) - SET_CTL_CONST_offset) >> 2);		\
-    } else if ((reg) >= SET_LOOP_CONST_offset && (reg) < SET_LOOP_CONST_end) { \
-	PACK3(IT_SET_LOOP_CONST, (num) + 1);			\
-	E32(((reg) - SET_LOOP_CONST_offset) >> 2);		\
-    } else if ((reg) >= SET_BOOL_CONST_offset && (reg) < SET_BOOL_CONST_end) { \
-	PACK3(IT_SET_BOOL_CONST, (num) + 1);			\
-	E32(((reg) - SET_BOOL_CONST_offset) >> 2);		\
-    } else {								\
-	E32(CP_PACKET0 ((reg), (num) - 1));			\
-    }									\
-} while (0)
+#define PACK0(reg, num)													\
+	do {																\
+		if ((reg) >= SET_CONFIG_REG_offset && (reg) < SET_CONFIG_REG_end) {	\
+			PACK3(IT_SET_CONFIG_REG, (num) + 1);						\
+			E32(((reg) - SET_CONFIG_REG_offset) >> 2);                  \
+		} else if ((reg) >= SET_CONTEXT_REG_offset && (reg) < SET_CONTEXT_REG_end) { \
+			PACK3(IT_SET_CONTEXT_REG, (num) + 1);						\
+			E32(((reg) - SET_CONTEXT_REG_offset) >> 2);					\
+		} else if ((reg) >= SET_RESOURCE_offset && (reg) < SET_RESOURCE_end) { \
+			PACK3(IT_SET_RESOURCE, num + 1);							\
+			E32(((reg) - SET_RESOURCE_offset) >> 2);					\
+		} else if ((reg) >= SET_SAMPLER_offset && (reg) < SET_SAMPLER_end) { \
+			PACK3(IT_SET_SAMPLER, (num) + 1);							\
+			E32((reg - SET_SAMPLER_offset) >> 2);						\
+		} else if ((reg) >= SET_CTL_CONST_offset && (reg) < SET_CTL_CONST_end) { \
+			PACK3(IT_SET_CTL_CONST, (num) + 1);							\
+			E32(((reg) - SET_CTL_CONST_offset) >> 2);					\
+		} else if ((reg) >= SET_LOOP_CONST_offset && (reg) < SET_LOOP_CONST_end) { \
+			PACK3(IT_SET_LOOP_CONST, (num) + 1);						\
+			E32(((reg) - SET_LOOP_CONST_offset) >> 2);					\
+		} else if ((reg) >= SET_BOOL_CONST_offset && (reg) < SET_BOOL_CONST_end) { \
+			PACK3(IT_SET_BOOL_CONST, (num) + 1);						\
+			E32(((reg) - SET_BOOL_CONST_offset) >> 2);					\
+		} else {														\
+			E32(CP_PACKET0 ((reg), (num) - 1));							\
+		}																\
+	} while (0)
 
 /* write a single register */
-#define EREG(reg, val)                                              \
-do {								        \
-    PACK0((reg), 1);						\
-    E32((val));							\
-} while (0)
+#define EREG(reg, val)							\
+	do {								        \
+		PACK0((reg), 1);						\
+		E32((val));								\
+	} while (0)
 
+void
+evergreen_start_3d(void);
+void
+evergreen_set_screen_scissor(int x1, int y1, int x2, int y2);
+void
+evergreen_set_vport_scissor(int id, int x1, int y1, int x2, int y2);
+void
+evergreen_set_generic_scissor(int x1, int y1, int x2, int y2);
+void
+evergreen_set_window_scissor(int x1, int y1, int x2, int y2);
+void
+evergreen_set_clip_rect(int id, int x1, int y1, int x2, int y2);
+void
+evergreen_fs_setup(shader_config_t *fs_conf, uint32_t domain);
+void
+evergreen_set_default_state(struct radeon_bo *shader_bo);
+void
+evergreen_vs_setup(shader_config_t *vs_conf, uint32_t domain);
+void
+evergreen_ps_setup(shader_config_t *ps_conf, uint32_t domain);
+void
+evergreen_set_render_target(cb_config_t *cb_conf, uint32_t domain);
+void
+evergreen_set_spi(int vs_export_count, int num_interp);
+void
+evergreen_set_alu_consts(const_config_t *const_conf, uint32_t domain);
+void
+evergreen_draw_auto(draw_config_t *draw_conf);
+void
+evergreen_finish_op(struct radeon_bo *dst, int size, struct radeon_bo *vbo, int offset, int vtx_size);
 
 #endif
