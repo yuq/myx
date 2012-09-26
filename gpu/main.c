@@ -156,9 +156,9 @@ void gpu_draw(struct radeon_bo *dst_bo, int width, int height, int size, unsigne
     evergreen_ps_setup(&ps_conf, RADEON_GEM_DOMAIN_VRAM);
 
 
-	int planemask = 0;
-	int rop = 0;
-	int tiling_flags = 0;
+	int planemask = 0xffffffff;
+	int rop = 3;
+	int tiling_flags = 2;
 	cb_conf.id = 0;
     cb_conf.w = width;
     cb_conf.h = height;
@@ -191,6 +191,7 @@ void gpu_draw(struct radeon_bo *dst_bo, int width, int height, int size, unsigne
 	assert((cbuf_bo = radeon_bo_open(drm.bufmgr, 0, (16*1024), 0, RADEON_GEM_DOMAIN_GTT, 0)) != NULL);
 	radeon_bo_ref(cbuf_bo);
 	assert(radeon_bo_map(cbuf_bo, 1) == 0);
+	assert(radeon_cs_space_check_with_bo(drm.cs, cbuf_bo, RADEON_GEM_DOMAIN_GTT, 0) == 0);
 
 	/* PS alu constants */
 	float *ps_alu_consts;
@@ -219,13 +220,14 @@ void gpu_draw(struct radeon_bo *dst_bo, int width, int height, int size, unsigne
 	assert((vbo_bo = radeon_bo_open(drm.bufmgr, 0, (16*1024), 0, RADEON_GEM_DOMAIN_GTT, 0)) != NULL);
 	radeon_bo_ref(vbo_bo);
 	assert(radeon_bo_map(vbo_bo, 1) == 0);
+	assert(radeon_cs_space_check_with_bo(drm.cs, vbo_bo, RADEON_GEM_DOMAIN_GTT, 0) == 0);
 
 	// from EVERGREENSolid()
 	int x1 = 100;
 	int y1 = 100;
 	int x2 = 400;
 	int y2 = 400;
-	float *vb = vbo_bo->ptr + vbo_offset;;
+	float *vb = vbo_bo->ptr + vbo_offset;
 	vb[0] = (float)x1;
     vb[1] = (float)y1;
 
@@ -240,6 +242,10 @@ void gpu_draw(struct radeon_bo *dst_bo, int width, int height, int size, unsigne
 	evergreen_finish_op(dst_bo, size, vbo_bo, vbo_offset, 8);
 
 	// radeon_cs_flush_indirect()
+	radeon_bo_unmap(vbo_bo);
+	radeon_bo_unref(vbo_bo);
+	radeon_bo_unmap(cbuf_bo);
+	radeon_bo_unref(cbuf_bo);
 	radeon_cs_emit(drm.cs);
 }
 
@@ -259,7 +265,7 @@ int main()
 	memset(bo->ptr, 0xff, pitch * 10);
 
 	// GPU draw
-	gpu_draw(bo, width, height, size, 0xffffffff);
+	gpu_draw(bo, width, height, size, 0xffff0000);
 
 	int fb_id;
     assert(drmModeAddFB(drm.fd, width, height, depth, bpp, pitch, bo->handle, &fb_id) == 0);
