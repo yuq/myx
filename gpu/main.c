@@ -158,7 +158,8 @@ void gpu_draw(struct radeon_bo *dst_bo, int width, int height, int size, unsigne
 
 	int planemask = 0xffffffff;
 	int rop = 3;
-	int tiling_flags = 2;
+	// gdb find xserver = 2, but will cause tile
+	int tiling_flags = 0;
 	cb_conf.id = 0;
     cb_conf.w = width;
     cb_conf.h = height;
