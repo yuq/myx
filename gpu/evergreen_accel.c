@@ -537,13 +537,16 @@ evergreen_vs_setup(shader_config_t *vs_conf, uint32_t domain)
 								  vs_conf->bo, domain, 0);
 
     BEGIN_BATCH(3 + 2);
+	// Memory address of the first CF instruction of the shader code for the vertex shader (VS)
     EREG(SQ_PGM_START_VS, vs_conf->shader_addr >> 8);
     RELOC_BATCH(vs_conf->bo, domain, 0);
     END_BATCH();
 
     BEGIN_BATCH(4);
     PACK0(SQ_PGM_RESOURCES_VS, 2);
+	// Resource requirements to run the VS program.
     E32(sq_pgm_resources);
+	// Additional shader resources
     E32(sq_pgm_resources_2);
     END_BATCH();
 }
@@ -589,6 +592,10 @@ evergreen_ps_setup(shader_config_t *ps_conf, uint32_t domain)
     PACK0(SQ_PGM_RESOURCES_PS, 3);
     E32(sq_pgm_resources);
     E32(sq_pgm_resources_2);
+	// Defines the exports from the Pixel Shader Program.
+	// EXPORT_MODE 	4:0 	0x0 	Pixel Shader export mode. bbbbz where 
+	// bbbb is how many color we export (0-8) and z is export z or not. 
+	// It is illegal to program this to all zeros.
     E32(ps_conf->export_mode);
     END_BATCH();
 }
@@ -644,6 +651,7 @@ evergreen_set_render_target(cb_config_t *cb_conf, uint32_t domain)
     }
 
     BEGIN_BATCH(3 + 2);
+	// Base address for colour surface.
     EREG(CB_COLOR0_BASE + (0x3c * cb_conf->id), (cb_conf->base >> 8));
     RELOC_BATCH(cb_conf->bo, 0, domain);
     END_BATCH();
@@ -653,10 +661,12 @@ evergreen_set_render_target(cb_config_t *cb_conf, uint32_t domain)
      * then have a valid cmd stream
      */
     BEGIN_BATCH(3 + 2);
+	// Base address for cmask surface. (color mask?)
     EREG(CB_COLOR0_CMASK + (0x3c * cb_conf->id), (0     >> 8));
     RELOC_BATCH(cb_conf->bo, 0, domain);
     END_BATCH();
     BEGIN_BATCH(3 + 2);
+	// Base address for fmask surface. (?)
     EREG(CB_COLOR0_FMASK + (0x3c * cb_conf->id), (0     >> 8));
     RELOC_BATCH(cb_conf->bo, 0, domain);
     END_BATCH();
@@ -683,7 +693,19 @@ evergreen_set_render_target(cb_config_t *cb_conf, uint32_t domain)
     E32(0);
     E32(0);
     E32(0);
+	// Contains color component mask fields for writing the MRTs. 
+	// Red, green, blue, and alpha are components 0, 1, 2, and 3 in 
+	// the pixel shader and are enabled by bits 0, 1, 2, and 3 in each field.
+	// TARGET0_ENABLE 	3:0 	none 	Enables writing to MRT 0 components. 
+	// The low order bit corresponds to the red channel. A zero bit disables 
+	// writing to that channel and a one bit enables writing to that channel.
     EREG(CB_TARGET_MASK, (cb_conf->pmask << TARGET0_ENABLE_shift));
+	// Controls general CB behaviour across all MRTs.
+	// ROP3 	23:16 	none 	This field supports the 28 boolean ops that 
+	// combine either source and dest or brush and dest, with brush provided 
+	// by the shader in place of source. The code 0xCC (11001100) copies the 
+	// source to the destination, which disables the ROP function. ROP must 
+	// be disabled if any MRT enables blending.
     EREG(CB_COLOR_CONTROL, (EVERGREEN_ROP[cb_conf->rop] |
 							(CB_NORMAL << CB_COLOR_CONTROL__MODE_shift)));
     EREG(CB_BLEND0_CONTROL, cb_conf->blendcntl);
@@ -695,8 +717,10 @@ evergreen_set_spi(int vs_export_count, int num_interp)
 {
     BEGIN_BATCH(8);
     /* Interpolator setup */
+	// Number of vectors exported by the VS (value is minus 1)
     EREG(SPI_VS_OUT_CONFIG, (vs_export_count << VS_EXPORT_COUNT_shift));
     PACK0(SPI_PS_IN_CONTROL_0, 3);
+	// Number of parameters to interp (not minus 1).
     E32(((num_interp << NUM_INTERP_shift) |
 		 LINEAR_GRADIENT_ENA_bit)); // SPI_PS_IN_CONTROL_0
     E32(0); // SPI_PS_IN_CONTROL_1
@@ -730,9 +754,17 @@ evergreen_set_alu_consts(const_config_t *const_conf, uint32_t domain)
 		break;
     case SHADER_TYPE_PS:
 		BEGIN_BATCH(3);
+		// Number of elements in this constant buffer [0..4096], in units 
+		// of 16 constants (cache lines). Associated with SQ_ALU_CONST_CACHE_PS_0. 
+		// You must always write both CONST_BUFFER_SIZE and CONST_CACHE, 
+		// unless size=0 in which case you may write only size.
 		EREG(SQ_ALU_CONST_BUFFER_SIZE_PS_0, size);
 		END_BATCH();
 		BEGIN_BATCH(3 + 2);
+		// Base address of constant-buffer #0 used by the constant cache, 
+		// 256B aligned address [39:8]. You must always write both 
+		// CONST_BUFFER_SIZE and CONST_CACHE, unless size=0 in which 
+		// case you may write only size.
 		EREG(SQ_ALU_CONST_CACHE_PS_0, const_conf->const_addr >> 8);
 		RELOC_BATCH(const_conf->bo, domain, 0);
 		END_BATCH();
@@ -778,6 +810,10 @@ evergreen_set_vtx_resource(vtx_resource_t *res, uint32_t domain, int offset)
 
     BEGIN_BATCH(10 + 2);
     PACK0(SQ_FETCH_RESOURCE + res->id * SQ_FETCH_RESOURCE_offset, 8);
+	// SQ_VTX_CONSTANT_WORD0_0
+	// Vertex fetch constant state, word 0. PS=0..159, VS/ES=160..335, GS=336..495, 
+	// HS=496..655, LS=656..815, CS=816..975, FS=976..1007 Texture Resources & Vertex 
+	// fetch constants share the same physical registers.
     E32(res->vb_addr & 0xffffffff);				// 0: BASE_ADDRESS
     E32((res->vtx_num_entries << 2) - 1);			// 1: SIZE
     E32(sq_vtx_constant_word2);	// 2: BASE_HI, STRIDE, CLAMP, FORMAT, ENDIAN
@@ -801,6 +837,7 @@ evergreen_draw_auto(draw_config_t *draw_conf)
     E32(draw_conf->num_instances);
     PACK3(IT_DRAW_INDEX_AUTO, 2);
     E32(draw_conf->num_indices);
+	// The act of writing this register is a trigger that initiates processing in the VGT. 
     E32(draw_conf->vgt_draw_initiator);
     END_BATCH();
 }
@@ -828,6 +865,7 @@ evergreen_finish_op(struct radeon_bo *dst, int size, struct radeon_bo *vbo, int 
 
     /* Draw */
     draw_conf.prim_type          = DI_PT_RECTLIST;
+	// Auto-increment Index 
     draw_conf.vgt_draw_initiator = DI_SRC_SEL_AUTO_INDEX;
     draw_conf.num_instances      = 1;
     draw_conf.num_indices        = vtx_res.vtx_num_entries / vtx_res.vtx_size_dw;
