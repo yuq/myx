@@ -21,6 +21,10 @@ struct {
 void *mmiobase = 0;
 unsigned int iobase = 0;
 unsigned int *fb = 0;
+// assume LFB MC base address = 0 and mapped to pci aperture address offset 0
+unsigned int pci_aperture_offset = 0x0000000;
+int fbw = 0x280, fbh = 0x1e0;
+int monw = 0x280, monh = 0x1e0;
 
 static inline uint32_t RREG32(uint32_t reg)
 {
@@ -117,6 +121,10 @@ static void print_primary_surface(void)
 		   RREG32(EVERGREEN_GRPH_SURFACE_OFFSET_X + EVERGREEN_CRTC0_REGISTER_OFFSET),
 		   RREG32(EVERGREEN_GRPH_SURFACE_OFFSET_Y + EVERGREEN_CRTC0_REGISTER_OFFSET));
 
+	printk(KERN_ERR "[MYDRM]: GRPH_CONTROL=%x GRPH_PITCH=%x\n",
+		   RREG32(EVERGREEN_GRPH_CONTROL + EVERGREEN_CRTC0_REGISTER_OFFSET),
+		   RREG32(EVERGREEN_GRPH_PITCH + EVERGREEN_CRTC0_REGISTER_OFFSET));
+
 	printk(KERN_ERR "[MYDRM]: GRPH_X_START=%x GRPH_Y_START=%x\n",
 		   RREG32(EVERGREEN_GRPH_X_START + EVERGREEN_CRTC0_REGISTER_OFFSET),
 		   RREG32(EVERGREEN_GRPH_Y_START + EVERGREEN_CRTC0_REGISTER_OFFSET));
@@ -134,13 +142,84 @@ static void print_primary_surface(void)
 
 	printk(KERN_ERR "[MYDRM]: GB_ADDR_CONFIG=%x\n",
 		   RREG32(GB_ADDR_CONFIG));
+
+	printk(KERN_ERR "[MYDRM]: HDP_HOST_PATH_CNTL=%x HDP_NONSURFACE_BASE=%x "
+		   "HDP_NONSURFACE_INFO=%x HDP_NONSURFACE_SIZE=%x\n",
+		   RREG32(HDP_HOST_PATH_CNTL), RREG32(HDP_NONSURFACE_BASE), 
+		   RREG32(HDP_NONSURFACE_INFO), RREG32(HDP_NONSURFACE_SIZE));
+}
+
+void setcrtc(void)
+{
+	WREG32(EVERGREEN_GRPH_PRIMARY_SURFACE_ADDRESS_HIGH + EVERGREEN_CRTC0_REGISTER_OFFSET, 0);
+	WREG32(EVERGREEN_GRPH_PRIMARY_SURFACE_ADDRESS + EVERGREEN_CRTC0_REGISTER_OFFSET, pci_aperture_offset);
+	WREG32(EVERGREEN_GRPH_SECONDARY_SURFACE_ADDRESS_HIGH + EVERGREEN_CRTC0_REGISTER_OFFSET, 0);
+	WREG32(EVERGREEN_GRPH_SECONDARY_SURFACE_ADDRESS + EVERGREEN_CRTC0_REGISTER_OFFSET, pci_aperture_offset);
+	WREG32(EVERGREEN_GRPH_SURFACE_OFFSET_X + EVERGREEN_CRTC0_REGISTER_OFFSET, 0);
+	WREG32(EVERGREEN_GRPH_SURFACE_OFFSET_Y + EVERGREEN_CRTC0_REGISTER_OFFSET, 0);
+	// this determine the surface width
+	WREG32(EVERGREEN_GRPH_PITCH + EVERGREEN_CRTC0_REGISTER_OFFSET, fbw);
+	// control which part of the surface will be displayed on monitor
+	// 
+	// Surface                  Monitor
+	// +---------------+        +---------------+
+	// | (x,y)         |        |       NA      |
+	// |   +----+      |        |  +----+       |
+	// |   |    |      |        |  |  A |       |
+	// |   +----+      |        |  +----+       |
+	// |     (xe,ye)   |        |               |
+	// +---------------+        +---------------+
+	WREG32(EVERGREEN_GRPH_X_START + EVERGREEN_CRTC0_REGISTER_OFFSET, 0);
+	WREG32(EVERGREEN_GRPH_Y_START + EVERGREEN_CRTC0_REGISTER_OFFSET, 0);
+	WREG32(EVERGREEN_GRPH_X_END + EVERGREEN_CRTC0_REGISTER_OFFSET, fbw);
+	WREG32(EVERGREEN_GRPH_Y_END + EVERGREEN_CRTC0_REGISTER_OFFSET, fbh);
+	// Surface                  Monitor
+	// +---------------+        +---------------+
+	// | (x,y)         |        |       NA      |
+	// |   +----+      |        |     +----+    |
+	// |   |    |      |        |     |  A |    |
+	// |   +----+      |        |     +----+    |
+	// |     (xe,ye)   |        |     center    |
+	// +---------------+        +---------------+
+	WREG32(EVERGREEN_VIEWPORT_START + EVERGREEN_CRTC0_REGISTER_OFFSET, 0x0000000);
+	WREG32(EVERGREEN_VIEWPORT_SIZE + EVERGREEN_CRTC0_REGISTER_OFFSET, (monw << 16) | monh);
+	WREG32(EVERGREEN_DESKTOP_HEIGHT + EVERGREEN_CRTC0_REGISTER_OFFSET, fbh);
+}
+
+void setup_mc(void)
+{
+	int i;
+
+	WREG32(VGA_HDP_CONTROL, VGA_MEMORY_DISABLE);
+
+	WREG32(MC_VM_SYSTEM_APERTURE_LOW_ADDR, 0 >> 12);
+	WREG32(MC_VM_SYSTEM_APERTURE_HIGH_ADDR, 0x1f000000 >> 12);
+
+	// HDP (Host Data Path) init
+	for (i = 0; i < HDP_SURFACE_NUM; i++) {
+		WREG32(HDP_SURFACE_LOWER_BOUND + i * HDP_SURFACE_OFFSET, 0);
+		WREG32(HDP_SURFACE_UPPER_BOUND + i * HDP_SURFACE_OFFSET, 0);
+		WREG32(HDP_SURFACE_BASE + i * HDP_SURFACE_OFFSET, 0);
+		WREG32(HDP_SURFACE_INFO + i * HDP_SURFACE_OFFSET, 0);
+		WREG32(HDP_SURFACE_SIZE + i * HDP_SURFACE_OFFSET, 0);
+	}
+
+	WREG32(HDP_NONSURFACE_BASE, (0 >> 8));
+	WREG32(HDP_NONSURFACE_INFO, (2 << 7) | (1 << 30));
+	WREG32(HDP_NONSURFACE_SIZE, 0x1f000000);
 }
 
 void draw(void)
 {
-	WREG32(EVERGREEN_VIEWPORT_START + EVERGREEN_CRTC0_REGISTER_OFFSET, 0);
-	WREG32(EVERGREEN_VIEWPORT_SIZE + EVERGREEN_CRTC0_REGISTER_OFFSET, 0x4000300);
-	memset(fb, 0xff, 0x10000);
+	int i;
+	/*
+	int x=50, y=50, xe=100, ye=300;
+	for (i = y; i < ye; i++)
+		memset(fb + 4 * (fbw * i + x), 0xff, 4 * (xe - x));
+	*/
+
+	memset(fb + 4 * (fbw * 5 + 20), 0xff, 4 * fbw * 2);
+	memset(fb + 4 * (fbw * 6 + 20), 0xff, 4 * fbw);
 }
 
 static int __devinit
@@ -171,7 +250,11 @@ mydrm_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	print_primary_surface();
 
-	fb = ioremap(bar[0].addr, 0x1000000);
+	setup_mc();
+
+	setcrtc();
+
+	fb = ioremap(bar[0].addr + pci_aperture_offset, 0x1000000);
 
 	draw();
 
