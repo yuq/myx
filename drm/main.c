@@ -1,12 +1,9 @@
-#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
 
-#include "avivod.h"
-#include "evergreend.h"
-#include "evergreen_reg.h"
+#include "mydrm.h"
 
 static struct pci_device_id pciidlist[] = {
 	{0x1002, 0x68be, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
@@ -23,18 +20,8 @@ unsigned int iobase = 0;
 unsigned int *fb = 0;
 // assume LFB MC base address = 0 and mapped to pci aperture address offset 0
 unsigned int pci_aperture_offset = 0x0000000;
-int fbw = 0x280, fbh = 0x1e0;
-int monw = 0x280, monh = 0x1e0;
-
-static inline uint32_t RREG32(uint32_t reg)
-{
-	return readl(mmiobase + reg);
-}
-
-static inline void WREG32(uint32_t reg, uint32_t val)
-{
-	writel(val, mmiobase + reg);
-}
+int fbw = 0x500, fbh = 0x500;
+int monw = 0x500, monh = 0x400;
 
 static void __attribute__ ((unused)) card_reset(void)
 {
@@ -151,6 +138,13 @@ static void print_primary_surface(void)
 
 void setcrtc(void)
 {
+	int i;
+	uint32_t tmp = RREG32(EVERGREEN_GRPH_UPDATE + EVERGREEN_CRTC0_REGISTER_OFFSET);
+
+	/* Lock the graphics update lock */
+	tmp |= EVERGREEN_GRPH_UPDATE_LOCK;
+	WREG32(EVERGREEN_GRPH_UPDATE + EVERGREEN_CRTC0_REGISTER_OFFSET, tmp);
+
 	WREG32(EVERGREEN_GRPH_PRIMARY_SURFACE_ADDRESS_HIGH + EVERGREEN_CRTC0_REGISTER_OFFSET, 0);
 	WREG32(EVERGREEN_GRPH_PRIMARY_SURFACE_ADDRESS + EVERGREEN_CRTC0_REGISTER_OFFSET, pci_aperture_offset);
 	WREG32(EVERGREEN_GRPH_SECONDARY_SURFACE_ADDRESS_HIGH + EVERGREEN_CRTC0_REGISTER_OFFSET, 0);
@@ -184,6 +178,17 @@ void setcrtc(void)
 	WREG32(EVERGREEN_VIEWPORT_START + EVERGREEN_CRTC0_REGISTER_OFFSET, 0x0000000);
 	WREG32(EVERGREEN_VIEWPORT_SIZE + EVERGREEN_CRTC0_REGISTER_OFFSET, (monw << 16) | monh);
 	WREG32(EVERGREEN_DESKTOP_HEIGHT + EVERGREEN_CRTC0_REGISTER_OFFSET, fbh);
+
+	/* Wait for update_pending to go high. */
+	for (i = 0; i < 1000; i++) {
+		if (RREG32(EVERGREEN_GRPH_UPDATE + EVERGREEN_CRTC0_REGISTER_OFFSET) & EVERGREEN_GRPH_SURFACE_UPDATE_PENDING)
+			break;
+		udelay(1);
+	}
+
+	/* Unlock the lock, so double-buffering can take place inside vblank */
+	tmp &= ~EVERGREEN_GRPH_UPDATE_LOCK;
+	WREG32(EVERGREEN_GRPH_UPDATE + EVERGREEN_CRTC0_REGISTER_OFFSET, tmp);
 }
 
 void setup_mc(void)
@@ -194,6 +199,8 @@ void setup_mc(void)
 
 	WREG32(MC_VM_SYSTEM_APERTURE_LOW_ADDR, 0 >> 12);
 	WREG32(MC_VM_SYSTEM_APERTURE_HIGH_ADDR, 0x1f000000 >> 12);
+
+	WREG32(HDP_REG_COHERENCY_FLUSH_CNTL, 0);
 
 	// HDP (Host Data Path) init
 	for (i = 0; i < HDP_SURFACE_NUM; i++) {
