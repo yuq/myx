@@ -221,12 +221,7 @@ static bool atombios_map(struct pci_dev *pdev)
 		pci_unmap_rom(pdev, bios);
 		return false;
 	}
-	atombios = kmemdup(bios, size, GFP_KERNEL);
-	if (atombios == NULL) {
-		pci_unmap_rom(pdev, bios);
-		return false;
-	}
-	pci_unmap_rom(pdev, bios);
+	atombios = bios;
 	return true;
 }
 
@@ -337,6 +332,37 @@ int atombios_init(void *bios)
 	return 0;
 }
 
+int radeon_gpu_probe(void)
+{
+	uint8 tableMajor;
+	uint8 tableMinor;
+	uint16 tableOffset;
+
+	union atomFirmwareInfo {
+		ATOM_FIRMWARE_INFO info;
+		ATOM_FIRMWARE_INFO_V1_2 info_12;
+		ATOM_FIRMWARE_INFO_V1_3 info_13;
+		ATOM_FIRMWARE_INFO_V1_4 info_14;
+		ATOM_FIRMWARE_INFO_V2_1 info_21;
+		ATOM_FIRMWARE_INFO_V2_2 info_22;
+	};
+	union atomFirmwareInfo* firmwareInfo;
+
+	int index;
+
+	index = GetIndexIntoMasterTable(DATA, FirmwareInfo);
+	if (atom_parse_data_header(gAtomContext, index, NULL, &tableMajor, &tableMinor, &tableOffset)) {
+		printk(KERN_ERR "%s: Couldn't parse data header\n", __func__);
+		return -1;
+	}
+
+	printk(KERN_ERR "%s: table %d.%d\n", __func__, tableMajor, tableMinor);
+
+	firmwareInfo = (union atomFirmwareInfo*)(gAtomContext->bios + tableOffset);
+
+	return 0;
+}
+
 static int __devinit
 mydrm_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
@@ -354,21 +380,24 @@ mydrm_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	if (!atombios_map(pdev)) {
 		printk(KERN_ERR "[MYDRM]: can't map ROM\n");
-		return -1;
+		goto err0;
 	}
 
 	mmiobase = ioremap(bar[2].addr, bar[2].len);
 	if (mmiobase == NULL) {
 		printk(KERN_ERR "[MYDRM]: MMIO remap fail\n");
-		return -ENOMEM;
+		goto err1;
 	}
 	printk(KERN_ERR "[MYDRM]: MMIO remap to %08x\n", (unsigned int)mmiobase);
 
 	iobase = bar[4].addr;
 
 	if (atombios_init(atombios)) {
-		iounmap(mmiobase);
-		return -1;
+		goto err2;
+	}
+
+	if (radeon_gpu_probe()) {
+		goto err3;
 	}
 
 	//card_reset();
@@ -386,6 +415,16 @@ mydrm_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	//draw();
 
 	return 0;
+
+ err3:
+	kfree(gAtomContext->card);
+	kfree(gAtomContext);
+ err2:
+	iounmap(mmiobase);
+ err1:
+	pci_unmap_rom(pdev, atombios);
+ err0:
+	return -1;
 }
 
 static void
@@ -395,7 +434,7 @@ mydrm_pci_remove(struct pci_dev *pdev)
 	kfree(gAtomContext->card);
 	kfree(gAtomContext);
 	iounmap(mmiobase);
-	kfree(atombios);
+	pci_unmap_rom(pdev, atombios);
 	printk(KERN_ERR "[MYDRM]: remove card\n");
 }
 
