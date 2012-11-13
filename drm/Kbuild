@@ -2,5 +2,5 @@
 MODNAME := mydrm
 
 obj-m := $(MODNAME).o
-$(MODNAME)-y := main.o
+$(MODNAME)-y := main.o evergreen.o atombios/atom.o
 

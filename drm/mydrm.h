@@ -2,10 +2,15 @@
 #define _MYDRM_H
 
 #include <linux/kernel.h>
+#include <linux/delay.h>
+#include <asm/io.h>
 
+#include "r600_reg.h"
 #include "avivod.h"
 #include "evergreend.h"
 #include "evergreen_reg.h"
+
+#include "atombios/atom.h"
 
 extern void *mmiobase;
 
@@ -25,6 +30,8 @@ struct evergreen_mc_save {
 	u32 vga_hdp_control;
 	u32 crtc_control[6];
 };
+
+void evergreen_mc_program(void);
 
 #endif
 

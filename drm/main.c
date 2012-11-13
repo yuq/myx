@@ -1,9 +1,10 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/pci.h>
-#include <linux/delay.h>
 
 #include "mydrm.h"
+
+MODULE_LICENSE("GPL");
 
 static struct pci_device_id pciidlist[] = {
 	{0x1002, 0x68be, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
@@ -18,10 +19,13 @@ struct {
 void *mmiobase = 0;
 unsigned int iobase = 0;
 unsigned int *fb = 0;
+unsigned char *atombios = 0;
 // assume LFB MC base address = 0 and mapped to pci aperture address offset 0
 unsigned int pci_aperture_offset = 0x0000000;
-int fbw = 0x500, fbh = 0x500;
+int fbw = 0x500, fbh = 0x400;
 int monw = 0x500, monh = 0x400;
+
+atom_context* gAtomContext = 0;
 
 static void __attribute__ ((unused)) card_reset(void)
 {
@@ -193,40 +197,144 @@ void setcrtc(void)
 
 void setup_mc(void)
 {
-	int i;
-
-	WREG32(VGA_HDP_CONTROL, VGA_MEMORY_DISABLE);
-
-	WREG32(MC_VM_SYSTEM_APERTURE_LOW_ADDR, 0 >> 12);
-	WREG32(MC_VM_SYSTEM_APERTURE_HIGH_ADDR, 0x1f000000 >> 12);
-
-	WREG32(HDP_REG_COHERENCY_FLUSH_CNTL, 0);
-
-	// HDP (Host Data Path) init
-	for (i = 0; i < HDP_SURFACE_NUM; i++) {
-		WREG32(HDP_SURFACE_LOWER_BOUND + i * HDP_SURFACE_OFFSET, 0);
-		WREG32(HDP_SURFACE_UPPER_BOUND + i * HDP_SURFACE_OFFSET, 0);
-		WREG32(HDP_SURFACE_BASE + i * HDP_SURFACE_OFFSET, 0);
-		WREG32(HDP_SURFACE_INFO + i * HDP_SURFACE_OFFSET, 0);
-		WREG32(HDP_SURFACE_SIZE + i * HDP_SURFACE_OFFSET, 0);
-	}
-
-	WREG32(HDP_NONSURFACE_BASE, (0 >> 8));
-	WREG32(HDP_NONSURFACE_INFO, (2 << 7) | (1 << 30));
-	WREG32(HDP_NONSURFACE_SIZE, 0x1f000000);
+	evergreen_mc_program();
 }
 
 void draw(void)
 {
-	int i;
-	/*
-	int x=50, y=50, xe=100, ye=300;
-	for (i = y; i < ye; i++)
-		memset(fb + 4 * (fbw * i + x), 0xff, 4 * (xe - x));
-	*/
-
 	memset(fb + 4 * (fbw * 5 + 20), 0xff, 4 * fbw * 2);
 	memset(fb + 4 * (fbw * 6 + 20), 0xff, 4 * fbw);
+}
+
+static bool atombios_map(struct pci_dev *pdev)
+{
+	uint8_t __iomem *bios;
+	size_t size;
+
+	/* XXX: some cards may return 0 for rom size? ddx has a workaround */
+	bios = pci_map_rom(pdev, &size);
+	if (!bios) {
+		return false;
+	}
+
+	if (size == 0 || bios[0] != 0x55 || bios[1] != 0xaa) {
+		pci_unmap_rom(pdev, bios);
+		return false;
+	}
+	atombios = kmemdup(bios, size, GFP_KERNEL);
+	if (atombios == NULL) {
+		pci_unmap_rom(pdev, bios);
+		return false;
+	}
+	pci_unmap_rom(pdev, bios);
+	return true;
+}
+
+uint32 _read32(uint32 offset)
+{
+	return RREG32(offset);
+}
+
+
+void _write32(uint32 offset, uint32 value)
+{
+	WREG32(offset, value);
+}
+
+
+// AtomBIOS cail register calls (are *4... no clue why)
+uint32 Read32Cail(uint32 offset)
+{
+	return _read32(offset * 4);
+}
+
+
+void Write32Cail(uint32 offset, uint32 value)
+{
+	_write32(offset * 4, value);
+}
+
+void atombios_init_scratch(void)
+{
+	uint32_t bios_2_scratch, bios_6_scratch;
+
+	bios_2_scratch = RREG32(R600_BIOS_2_SCRATCH);
+	bios_6_scratch = RREG32(R600_BIOS_6_SCRATCH);
+
+	/* let the bios control the backlight */
+	bios_2_scratch &= ~ATOM_S2_VRI_BRIGHT_ENABLE;
+
+	/* tell the bios not to handle mode switching */
+	bios_6_scratch |= ATOM_S6_ACC_BLOCK_DISPLAY_SWITCH;
+
+	WREG32(R600_BIOS_2_SCRATCH, bios_2_scratch);
+	WREG32(R600_BIOS_6_SCRATCH, bios_6_scratch);
+}
+
+bool atombios_isposted(void)
+{
+	// aka, is primary graphics card that POST loaded
+
+	uint32 reg;
+
+	// evergreen or higher
+	reg = RREG32(EVERGREEN_CRTC_CONTROL + EVERGREEN_CRTC0_REGISTER_OFFSET)
+		| RREG32(EVERGREEN_CRTC_CONTROL + EVERGREEN_CRTC1_REGISTER_OFFSET)
+		| RREG32(EVERGREEN_CRTC_CONTROL + EVERGREEN_CRTC2_REGISTER_OFFSET)
+		| RREG32(EVERGREEN_CRTC_CONTROL + EVERGREEN_CRTC3_REGISTER_OFFSET)
+		| RREG32(EVERGREEN_CRTC_CONTROL + EVERGREEN_CRTC4_REGISTER_OFFSET)
+		| RREG32(EVERGREEN_CRTC_CONTROL + EVERGREEN_CRTC5_REGISTER_OFFSET);
+	if ((reg & EVERGREEN_CRTC_MASTER_EN) != 0)
+		return true;
+
+	// also check memory size incase crt controlers are disabled
+	reg = RREG32(R600_CONFIG_MEMSIZE);
+
+	if (reg)
+		return true;
+
+	return false;
+}
+
+int atombios_init(void *bios)
+{
+	struct card_info* atom_card_info = kmalloc(sizeof(struct card_info), GFP_KERNEL);
+
+	if (!atom_card_info)
+		return -1;
+
+	atom_card_info->reg_read = Read32Cail;
+	atom_card_info->reg_write = Write32Cail;
+
+	// use MMIO instead of PCI I/O BAR
+	atom_card_info->ioreg_read = Read32Cail;
+	atom_card_info->ioreg_write = Write32Cail;
+
+	atom_card_info->mc_read = _read32;
+	atom_card_info->mc_write = _write32;
+	atom_card_info->pll_read = _read32;
+	atom_card_info->pll_write = _write32;
+
+	// Point AtomBIOS parser to card bios and malloc gAtomContext
+	gAtomContext = atom_parse(atom_card_info, bios);
+
+	if (gAtomContext == NULL) {
+		printk(KERN_ERR "%s: couldn't parse system AtomBIOS\n", __func__);
+		return -1;
+	}
+
+	atombios_init_scratch();
+	atom_allocate_fb_scratch(gAtomContext);
+
+	// post card atombios if needed
+	if (atombios_isposted() == false) {
+		printk(KERN_ERR "%s: init AtomBIOS for this card as it is not not posted\n", __func__);
+		atom_asic_init(gAtomContext);
+	} else {
+		printk(KERN_ERR "%s: AtomBIOS is already posted\n", __func__);
+	}
+
+	return 0;
 }
 
 static int __devinit
@@ -244,6 +352,11 @@ mydrm_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 			   i, bar[i].addr, bar[i].len, bar[i].flags);
 	}
 
+	if (!atombios_map(pdev)) {
+		printk(KERN_ERR "[MYDRM]: can't map ROM\n");
+		return -1;
+	}
+
 	mmiobase = ioremap(bar[2].addr, bar[2].len);
 	if (mmiobase == NULL) {
 		printk(KERN_ERR "[MYDRM]: MMIO remap fail\n");
@@ -253,17 +366,24 @@ mydrm_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	iobase = bar[4].addr;
 
+	if (atombios_init(atombios)) {
+		iounmap(mmiobase);
+		return -1;
+	}
+
 	//card_reset();
 
 	print_primary_surface();
 
-	setup_mc();
+	//setup_mc();
 
-	setcrtc();
+	//setcrtc();
+
+	//pci_aperture_offset = RREG32(EVERGREEN_GRPH_PRIMARY_SURFACE_ADDRESS + EVERGREEN_CRTC0_REGISTER_OFFSET);
 
 	fb = ioremap(bar[0].addr + pci_aperture_offset, 0x1000000);
 
-	draw();
+	//draw();
 
 	return 0;
 }
@@ -272,7 +392,10 @@ static void
 mydrm_pci_remove(struct pci_dev *pdev)
 {
 	iounmap(fb);
+	kfree(gAtomContext->card);
+	kfree(gAtomContext);
 	iounmap(mmiobase);
+	kfree(atombios);
 	printk(KERN_ERR "[MYDRM]: remove card\n");
 }
 
