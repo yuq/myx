@@ -1,0 +1,122 @@
+# scripts/Makefile.kernel
+#
+# 2011.10.19: Created by yuq <yuq825@gmail.com>
+#
+# included by the main top level Makefile
+# 
+########################################################################
+
+########################################################################
+# build system variable initialization
+########################################################################
+obj-core := 
+d        := ./
+subdir-cxxflags-y:=
+subdir-ccflags-y :=
+subdir-asflags-y :=
+
+########################################################################
+# build system functions
+########################################################################
+
+# $(call push_dir)
+#
+# Used to bild the current directory and directory compile flags stack. 
+# It must be called at the very beginning of the sub-Makefile.
+#
+# $(d) can be always used by the sub-Makefile code as the reference to 
+# the directory where sub-Makefile laies
+#
+define push_dir
+sp                  := $$(sp).x
+dirstack_$$(sp)     := $$(d)
+d                   := $$(dir)
+cxxflagstack_$$(sp) := $$(subdir-cxxflags-y)
+cflagstack_$$(sp)   := $$(subdir-ccflags-y)
+aflagstack_$$(sp)   := $$(subdir-asflags-y)
+endef
+
+# $(call pop_dir)
+#
+# Used to bild the current directory and directory compile flags stack. 
+# It must be called at the very end of the sub-Makefile.
+#
+define pop_dir
+d                 := $$(dirstack_$$(sp))
+subdir-cxxflags-y := $$(cxxflagstack_$$(sp))
+subdir-ccflags-y  := $$(cflagstack_$$(sp))
+subdir-asflags-y  := $$(aflagstack_$$(sp))
+sp                := $$(basename $$(sp))
+endef
+
+# $(call add_dir,<subdir>)
+#
+# Add a sub-directory to the whole build tree.
+#
+define add_dir
+dir := $$(d)$1
+$$(eval $$(call push_dir))
+include $$(dir)/Makefile
+$$(eval $$(call add_obj))
+$$(eval $$(call pop_dir))
+endef
+
+# $(call add_astarget,<file.S>)
+#
+# Create target for an assembly language source file.
+#
+define add_astarget
+$$(OBJDIR)/$$(d)$(subst .S,.o,$1): $$(d)$1
+	@echo + as $$<
+	@mkdir -p $$(dir $$@)
+	$$(V)$$(AS) $$(AFLAGS) $(subdir-asflags-y) $$(asflags-y) $$(AFLAGS_$1) -o $$@ $$<
+AFLAGS_$1 :=
+endef
+
+# $(call add_cctarget,<file.c>)
+#
+# Create target for a C language source file.
+#
+define add_cctarget
+$$(OBJDIR)/$$(d)$(subst .c,.o,$1): $$(d)$1
+	@echo + cc $$<
+	@mkdir -p $$(dir $$@)
+	$$(V)$$(CC) $$(CFLAGS) $(subdir-ccflags-y) $$(ccflags-y) $$(CFLAGS_$1) -o $$@ $$<
+CFLAGS_$1 :=
+endef
+
+# $(call add_cxxtarget,<file.cpp>)
+#
+# Create target for a C++ language source file.
+#
+define add_cxxtarget
+$$(OBJDIR)/$$(d)$(subst .cpp,.o,$1): $$(d)$1
+	@echo + cxx $$<
+	@mkdir -p $$(dir $$@)
+	$$(V)$$(CXX) $$(CXXFLAGS) $(subdir-cxxflags-y) $$(cxxflags-y) $$(CXXFLAGS_$1) -o $$@ $$<
+CXXFLAGS_$1 :=
+endef
+
+
+# $(call add_obj)
+#
+# Parse the obj-y variable to extract the obj-core files and sub-directory
+# information.
+#
+define add_obj
+obj-asfile := $$(filter %.S,$$(obj-y))
+obj-ccfile := $$(filter %.c,$$(obj-y))
+obj-cxxfile:= $$(filter %.cpp,$$(obj-y))
+obj-dir    := $$(filter %/,$$(obj-y))
+obj-core   += $$(addprefix $$(OBJDIR)/$$(d),$$(subst .S,.o,$$(obj-asfile)))
+obj-core   += $$(addprefix $$(OBJDIR)/$$(d),$$(subst .c,.o,$$(obj-ccfile)))
+obj-core   += $$(addprefix $$(OBJDIR)/$$(d),$$(subst .cpp,.o,$$(obj-cxxfile)))
+$$(foreach file,$$(obj-asfile),$$(eval $$(call add_astarget,$$(file))))
+$$(foreach file,$$(obj-ccfile),$$(eval $$(call add_cctarget,$$(file))))
+$$(foreach file,$$(obj-cxxfile),$$(eval $$(call add_cxxtarget,$$(file))))
+asflags-y :=
+ccflags-y :=
+cxxflags-y :=
+obj-y :=
+$$(foreach directory,$$(obj-dir),$$(eval $$(call add_dir,$$(directory))))
+endef

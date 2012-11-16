@@ -31,11 +31,11 @@ int main(void)
 
     for (i = 0; i < rrr->ncrtc; i++) {
 	XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(display, rrr, rrr->crtcs[i]);
-	printf("CRTC %d x=%d y=%d w=%d h=%d np=%d /p",
+	printf("CRTC %d x=%d y=%d w=%d h=%d np=%d mode=%d /p",
 	       rrr->crtcs[i],
 	       crtc_info->x, crtc_info->y,
 	       crtc_info->width, crtc_info->height,
-	       crtc_info->noutput);
+	       crtc_info->noutput, crtc_info->mode);
 	for (j = 0; j < crtc_info->noutput; j++)
 	    printf(" %d", crtc_info->outputs[j]);
 	printf(" /pp");
@@ -61,8 +61,10 @@ int main(void)
     }
 
     for (i = 0; i < rrr->nmode; i++) {
-	printf("MODE %d %s w=%d h=%d\n",
-	       rrr->modes[i].id, rrr->modes[i].name, rrr->modes[i].width, rrr->modes[i].height);
+	printf("MODE %d %s w=%d h=%d dotClock=%d hSyncStart=%d hSyncEnd=%d hTotal=%d hSkew=%d vSyncStart=%d vSyncEnd=%d vTotal=%d\n",
+	       rrr->modes[i].id, rrr->modes[i].name, rrr->modes[i].width, rrr->modes[i].height, rrr->modes[i].dotClock,
+		   rrr->modes[i].hSyncStart, rrr->modes[i].hSyncEnd, rrr->modes[i].hTotal, rrr->modes[i].hSkew, 
+		   rrr->modes[i].vSyncStart, rrr->modes[i].vSyncEnd, rrr->modes[i].vTotal);
     }
 
     XRRSelectInput(display, rootw, RRScreenChangeNotifyMask|RRCrtcChangeNotifyMask|RROutputChangeNotifyMask|RROutputPropertyNotifyMask);

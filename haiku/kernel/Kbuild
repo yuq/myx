@@ -1,0 +1,10 @@
+
+MODNAME := mydrm
+
+obj-m := $(MODNAME).o
+$(MODNAME)-y := main.o 
+
+
+
+
+
